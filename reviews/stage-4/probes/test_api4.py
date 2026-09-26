@@ -495,9 +495,9 @@ def test_closure_everywhere():
     p3 = ok(replan(ada, "t_1", inst(D(14), "20:00"), inst(D(14), "21:00")), 201)
     ok(apply(ada, p3["plan_id"]), 201)
     err(amend(bob, s["series_id"], 1, 0, "20:00"), 409, "table_unavailable")
-    # later plans respect earlier closures: on D, t_2 is closed 19:00-21:00; closing t_3 moves a
-    # four-top at 20:00 nowhere but a pair without t_2 (none) -> no feasible plan
-    ok(bk(bob, at="19:30", table="t_3", party=4), 201)
+    # later plans respect earlier closures: on D, t_2 is closed 19:00-21:00 and t_1 holds `a`;
+    # closing t_3 leaves the anchor booked on t_3 at 19:00 (D(7) == D()) nowhere to go, since
+    # every alternative uses t_2 or t_1 -> no feasible plan
     err(replan(ada, "t_3", inst(D(), "19:00"), inst(D(), "20:00")), 409, "no_feasible_plan")
     _ = a
 

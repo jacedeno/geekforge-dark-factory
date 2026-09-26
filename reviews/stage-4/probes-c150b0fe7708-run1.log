@@ -1,0 +1,78 @@
+== build stage-4..1 @ c150b0fe7708
+== A (stage-4, PORT=9123) healthy after 1.6 s
+== B (stage-4, default 8080) healthy
+== P1, P2, P3 healthy
+== stage-1 probes against stage-4 (regression)
+........................................................................ [ 57%]
+......................................................                   [100%]
+126 passed, 1 deselected in 94.19s (0:01:34)
+== stage-2 API probes against stage-4 (regression)
+.....................................                                    [100%]
+37 passed, 2 deselected in 6.41s
+== stage-2 browser probes against stage-4 (regression)
+.........................                                                [100%]
+25 passed in 33.03s
+== stage-3 probes against stage-4 (regression)
+.....................................                                    [100%]
+37 passed in 15.11s
+== stage-4 probes
+.....................................................................F.. [ 90%]
+........                                                                 [100%]
+=================================== FAILURES ===================================
+___________________________ test_closure_everywhere ____________________________
+
+    def test_closure_everywhere():
+        ada, bob = world()
+        a = ok(bk(ada, table="t_2", party=2), 201)
+        p = ok(replan(ada, "t_2", inst(D(), "19:00"), inst(D(), "21:00")), 201)
+        ok(apply(ada, p["plan_id"]), 201)
+        q = {"restaurant_id": "r_anker", "date": D(), "party_size": 2, "explain": "true"}
+        slots = {s["starts_at_local"][-5:]: s for s in ok(httpx.get(f"{BASE}/availability", params=q), 200)["slots"]}
+        for hhmm in ("18:00", "19:00", "20:30"):
+            s = slots[hhmm]
+            assert "t_2" not in s["available_table_ids"], hhmm
+            assert all("t_2" not in o["table_ids"] for o in s["available_options"]), hhmm
+            e = {x["table_id"]: x for x in s["explain"]}["t_2"]
+            assert e["available"] is False and e["rules"][1] == {"rule": "no_overlap", "holds": False}
+        assert "t_2" in slots["21:00"]["available_table_ids"]  # `to` is exclusive
+        err(bk(bob, at="20:30", table="t_2"), 409, "table_unavailable")
+        err(bk(bob, at="18:00", tables=["t_2", "t_3"], party=3), 409, "table_unavailable")
+        ok(bk(bob, at="21:00", table="t_2"), 201)                       # starts exactly at `to`
+        x = ok(bk(bob, D(8), table="t_3"), 201)
+        err(bob.patch(f"/reservations/{x['reference']}", json_={"starts_at_local": f"{D()}T19:00", "table_id": "t_2"}),
+            409, "table_unavailable")
+        err(bob.post("/reservation-moves", json_={"moves": [{"reference": x["reference"], "table_id": "t_2",
+                                                             "starts_at_local": f"{D()}T18:30"}]}, key_=key()),
+            409, "table_unavailable")
+        # series adoption whose occurrence lands in a closure
+        p2 = ok(replan(ada, "t_3", inst(D(14), "18:00"), inst(D(14), "23:00")), 201)
+        ok(apply(ada, p2["plan_id"]), 201)
+        anc = ok(bk(bob, D(7), at="19:00", table="t_3"), 201)
+        err(series(bob, anc["reference"], count=2), 409, "table_unavailable")
+        # series amend into a closure
+        anc2 = ok(bk(bob, D(7), at="21:00", table="t_1"), 201)
+        s = ok(series(bob, anc2["reference"], count=2), 201)
+        p3 = ok(replan(ada, "t_1", inst(D(14), "20:00"), inst(D(14), "21:00")), 201)
+        ok(apply(ada, p3["plan_id"]), 201)
+        err(amend(bob, s["series_id"], 1, 0, "20:00"), 409, "table_unavailable")
+        # later plans respect earlier closures: on D, t_2 is closed 19:00-21:00; closing t_3 moves a
+        # four-top at 20:00 nowhere but a pair without t_2 (none) -> no feasible plan
+>       ok(bk(bob, at="19:30", table="t_3", party=4), 201)
+
+reviews/stage-4/probes/test_api4.py:500: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+r = <Response [409 Conflict]>, status = 201
+
+    def ok(r, status):
+>       assert r.status_code == status, f"expected {status}, got {r.status_code}: {r.text[:400]}"
+E       AssertionError: expected 201, got 409: {"error": {"code": "table_unavailable", "message": "the table is taken for an overlapping interval"}}
+E       assert 409 == 201
+E        +  where 409 = <Response [409 Conflict]>.status_code
+
+reviews/stage-1/probes/test_probes.py:92: AssertionError
+=========================== short test summary info ============================
+FAILED reviews/stage-4/probes/test_api4.py::test_closure_everywhere - Asserti...
+1 failed, 79 passed in 19.88s
+== container A: 0 restarts oom=false running=true
+exit 1
