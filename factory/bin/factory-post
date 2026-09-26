@@ -25,7 +25,8 @@ factory_load_run_env
 
 mentions=""
 IFS=',' read -ra handles <<< "$to"
-for h in "${handles[@]}"; do h="${h#@}"; h="${h##*/}"; mentions+="@$h "; done
+# Jam resolves only complete handles (owner/name); a bare seat name gets the room owner's prefix.
+for h in "${handles[@]}"; do h="${h#@}"; [[ "$h" == */* ]] || h="${OWNER:?no OWNER in run.env}/$h"; mentions+="@$h "; done
 
 limit="${FACTORY_POST_CHARS:-3500}"
 # jam reads --body-file relative to the workspace, so the parts live inside the repository's

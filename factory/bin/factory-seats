@@ -3,7 +3,11 @@
 #
 #   factory-seats create --repo <result-dir> [--room-name <name>] [--effort <level>]
 #   factory-seats status [--repo <result-dir>]
-#   factory-seats remove [--repo <result-dir>]
+#   factory-seats remove [--repo <result-dir>] --yes-room-is-downloaded
+#
+# remove deletes the seats' Band agents. Band then shows every message they wrote as sent by
+# "Unknown", so a room downloaded afterwards fails the seat-to-mandate check. Download the room
+# first; remove refuses without --yes-room-is-downloaded.
 #
 # create: for each role, writes a launcher (<repo>.state/bin/seat-<role>) that sets the seat's
 # identity (role, git author, Jam session) and starts Claude Code; registers a Jam-owned agent
@@ -15,13 +19,14 @@ set -euo pipefail
 source "$(dirname "$0")/_lib.sh"
 
 cmd="${1:-}"; shift || true
-repo="" room_name="factory" effort=""
+repo="" room_name="factory" effort="" downloaded=0
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --repo) repo="$2"; shift 2 ;;
     --room-name) room_name="$2"; shift 2 ;;
     --effort) effort="$2"; shift 2 ;;
-    -h|--help) sed -n '2,15p' "$0"; exit 0 ;;
+    --yes-room-is-downloaded) downloaded=1; shift ;;
+    -h|--help) sed -n '2,20p' "$0"; exit 0 ;;
     *) die "unknown argument: $1" ;;
   esac
 done
@@ -59,6 +64,11 @@ create)
     cat > "$launcher" <<EOF
 #!/usr/bin/env bash
 # Launcher for the $role seat, written by factory-seats. Jam starts it in place of claude.
+# A daemon packaged as an AppImage leaks its bundled library and interpreter paths into every
+# child; the seat must see the host's own toolchain.
+unset LD_LIBRARY_PATH PYTHONHOME PYTHONPATH PYTHONDONTWRITEBYTECODE PERLLIB GIO_EXTRA_MODULES \
+      GSETTINGS_SCHEMA_DIR GST_PLUGIN_SYSTEM_PATH GST_PLUGIN_SYSTEM_PATH_1_0 QT_PLUGIN_PATH \
+      GDK_PIXBUF_MODULE_FILE APPDIR APPIMAGE
 export FACTORY_ROLE=$role FACTORY_REPO=$(printf %q "$repo") FACTORY_STATE=$(printf %q "$state")
 export JAM_SESSION=factory-$role
 export GIT_AUTHOR_NAME=$role GIT_COMMITTER_NAME=$role
@@ -95,6 +105,7 @@ status)
   if [[ -n "$repo" ]]; then FACTORY_REPO="$(cd "$repo" && pwd)"; factory_load_run_env; cat "$(factory_state)/run.env"; fi
   ;;
 remove)
+  (( downloaded )) || die "removing the seats turns their room messages into 'Unknown'; download the room first, then pass --yes-room-is-downloaded"
   for role in "${FACTORY_ROLES[@]}"; do
     if seat_exists "$role"; then jam rm --as "$owner/$role" >/dev/null && note "removed $owner/$role"; fi
   done
