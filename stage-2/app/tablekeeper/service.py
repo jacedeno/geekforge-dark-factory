@@ -62,6 +62,10 @@ def valid_email(email):
     return bool(local) and bool(domain)
 
 
+def _combination_not_allowed(message):
+    return ApiError(422, "combination_not_allowed", message)
+
+
 def valid_party(v):
     return is_int(v) and v >= 1
 
@@ -135,20 +139,51 @@ class Service:
         restaurant = self.state.restaurants[res.restaurant_id]
         return clock.now_utc() >= res.starts_utc - timedelta(minutes=restaurant.cutoff)
 
-    def _overlaps(self, restaurant, table_id, start, exclude):
+    def _overlaps(self, restaurant, table_ids, start, exclude):
+        """True when a confirmed reservation not in `exclude` holds any of these tables."""
+        members = set(table_ids)
         duration = timedelta(minutes=restaurant.duration)
         end = start + duration
         for other in self.state.reservations.values():
             if (other.status == "confirmed" and other.id not in exclude
-                    and other.restaurant_id == restaurant.id and other.table_id == table_id
+                    and other.restaurant_id == restaurant.id and members.intersection(other.table_ids)
                     and other.starts_utc < end and start < other.starts_utc + duration):
                 return True
         return False
 
-    def _check_booking(self, restaurant, table_id, local, party):
-        """D5 c..g for a known restaurant. Returns the start instant."""
-        if table_id not in restaurant.capacity:
-            raise not_found("table not found")
+    @staticmethod
+    def _requested_tables(item, wrong_type):
+        """E10 checks that need no restaurant. Returns the named table ids, or None if absent."""
+        if "table_id" in item and "table_ids" in item:
+            raise invalid("send either table_id or table_ids, not both")
+        if "table_id" in item:
+            return [item["table_id"]]
+        if "table_ids" not in item:
+            return None
+        ids = item["table_ids"]
+        if not isinstance(ids, list) or not all(isinstance(t, str) for t in ids):
+            raise wrong_type("table_ids must be an array of strings")
+        if not ids or len(set(ids)) != len(ids):
+            raise invalid("table_ids must name at least one table, without duplicates")
+        if len(ids) > 2:
+            raise _combination_not_allowed("at most two tables can be combined")
+        return list(ids)
+
+    @staticmethod
+    def _resolve_tables(restaurant, ids):
+        """The table set in stored order: 404 for unknown tables, 422 for undeclared pairs."""
+        for t in ids:
+            if t not in restaurant.capacity:
+                raise not_found("table not found")
+        if len(ids) == 1:
+            return list(ids)
+        pair = restaurant.pair(ids)
+        if pair is None:
+            raise _combination_not_allowed("these tables cannot be combined")
+        return pair
+
+    def _check_booking(self, restaurant, table_ids, local, party):
+        """D5 d..g for a known restaurant and table set. Returns the start instant."""
         start, error = clock.check_start(restaurant, local)
         if error == "invalid_local_time":
             raise ApiError(422, error, "that local time does not exist in the restaurant's zone")
@@ -156,7 +191,7 @@ class Service:
             raise ApiError(422, error, "the reservation is outside opening hours")
         if error == "not_on_slot_grid":
             raise ApiError(422, error, "the start time is not on the slot grid")
-        if party > restaurant.capacity[table_id]:
+        if party > restaurant.seats(table_ids):
             raise ApiError(422, "party_exceeds_capacity", "party size exceeds the table capacity")
         return start
 
@@ -271,16 +306,20 @@ class Service:
             duration = timedelta(minutes=restaurant.duration)
             booked = [r for r in self.state.reservations.values()
                       if r.status == "confirmed" and r.restaurant_id == restaurant.id]
+            options = [o for o in restaurant.options() if restaurant.seats(o) >= party]
             result = []
             for local, start in clock.slots(restaurant, day):
                 end = start + duration
-                busy = {r.table_id for r in booked
-                        if r.starts_utc < end and start < r.starts_utc + duration}
+                busy = {t for r in booked
+                        if r.starts_utc < end and start < r.starts_utc + duration
+                        for t in r.table_ids}
+                free = [o for o in options if busy.isdisjoint(o)]
                 result.append({
                     "starts_at_local": clock.format_local(local),
                     "starts_at": clock.render(start, restaurant.zone),
-                    "available_table_ids": [t["id"] for t in restaurant.tables
-                                            if t["capacity"] >= party and t["id"] not in busy],
+                    "available_table_ids": [o[0] for o in free if len(o) == 1],
+                    "available_options": [{"table_ids": list(o), "capacity": restaurant.seats(o)}
+                                          for o in free],
                 })
             return 200, {"restaurant_id": restaurant.id, "date": q["date"],
                          "timezone": restaurant.timezone, "slots": result}
@@ -301,26 +340,30 @@ class Service:
 
     def _create(self, uid, body):
         for name in ("restaurant_id", "table_id", "starts_at_local", "party_size"):
-            if name not in body:
+            if name == "table_id":
+                if "table_id" not in body and "table_ids" not in body:
+                    raise invalid("table_id or table_ids is required")
+            elif name not in body:
                 raise invalid(f"{name} is required")
         for name in ("restaurant_id", "table_id", "starts_at_local"):
-            if not isinstance(body[name], str):
+            if name in body and not isinstance(body[name], str):
                 raise malformed(f"{name} must be a string")
         if not valid_party(body["party_size"]):
             raise invalid("party_size must be an integer >= 1")
         local = clock.parse_local(body["starts_at_local"])
         if local is None:
             raise invalid("starts_at_local must be a local YYYY-MM-DDTHH:MM")
+        ids = self._requested_tables(body, malformed)
         restaurant = self.state.restaurants.get(body["restaurant_id"])
         if restaurant is None:
             raise not_found("restaurant not found")
-        table_id, party = body["table_id"], body["party_size"]
-        start = self._check_booking(restaurant, table_id, local, party)
-        if self._overlaps(restaurant, table_id, start, exclude=()):
+        table_ids, party = self._resolve_tables(restaurant, ids), body["party_size"]
+        start = self._check_booking(restaurant, table_ids, local, party)
+        if self._overlaps(restaurant, table_ids, start, exclude=()):
             raise self._unavailable()
         res = Reservation(
             id=self._new_id("res_", self.state.reservations), reference=self._new_reference(),
-            user_id=uid, restaurant_id=restaurant.id, table_id=table_id, party_size=party,
+            user_id=uid, restaurant_id=restaurant.id, table_ids=table_ids, party_size=party,
             status="confirmed", starts_local=local, starts_utc=start,
             created_at=clock.now_utc().replace(microsecond=0))
         self.state.add_reservation(res)
@@ -355,10 +398,11 @@ class Service:
         if self._cutoff_passed(res):
             raise ApiError(409, "cutoff_passed", "the amendment cutoff has passed")
 
-    @staticmethod
-    def _amended_values(res, item):
-        """Resulting (table_id, local, party, changed) after value checks; types already checked."""
-        table_id = item.get("table_id", res.table_id)
+    def _amended_values(self, res, item, wrong_type):
+        """Resulting (table_ids, local, party, changed) of an amendment, D5 b and E10 checks."""
+        for name in ("table_id", "starts_at_local"):
+            if name in item and not isinstance(item[name], str):
+                raise wrong_type(f"{name} must be a string")
         party = item.get("party_size", res.party_size)
         if not valid_party(party):
             raise invalid("party_size must be an integer >= 1")
@@ -367,12 +411,16 @@ class Service:
             local = clock.parse_local(item["starts_at_local"])
             if local is None:
                 raise invalid("starts_at_local must be a local YYYY-MM-DDTHH:MM")
-        changed = (table_id, local, party) != (res.table_id, res.starts_local, res.party_size)
-        return table_id, local, party, changed
+        ids = self._requested_tables(item, wrong_type)
+        table_ids = res.table_ids
+        if ids is not None:
+            table_ids = self._resolve_tables(self.state.restaurants[res.restaurant_id], ids)
+        changed = (table_ids, local, party) != (res.table_ids, res.starts_local, res.party_size)
+        return table_ids, local, party, changed
 
-    def _apply(self, res, table_id, local, party, start):
-        res.table_id, res.starts_local, res.party_size, res.starts_utc = (
-            table_id, local, party, start)
+    def _apply(self, res, table_ids, local, party, start):
+        res.table_ids, res.starts_local, res.party_size, res.starts_utc = (
+            list(table_ids), local, party, start)
 
     def patch(self, req):
         with self.lock:
@@ -380,17 +428,14 @@ class Service:
             body = parse_object(req.body)
             res = self._own(uid, req.params[0])
             self._amendable(res)
-            for name in ("table_id", "starts_at_local"):
-                if name in body and not isinstance(body[name], str):
-                    raise malformed(f"{name} must be a string")
-            table_id, local, party, changed = self._amended_values(res, body)
+            table_ids, local, party, changed = self._amended_values(res, body, malformed)
             if not changed:
                 return 200, self._view(res)
             restaurant = self.state.restaurants[res.restaurant_id]
-            start = self._check_booking(restaurant, table_id, local, party)
-            if self._overlaps(restaurant, table_id, start, exclude=(res.id,)):
+            start = self._check_booking(restaurant, table_ids, local, party)
+            if self._overlaps(restaurant, table_ids, start, exclude=(res.id,)):
                 raise self._unavailable()
-            self._apply(res, table_id, local, party, start)
+            self._apply(res, table_ids, local, party, start)
             return 200, self._view(res)
 
     # ---- atomic moves -------------------------------------------------------------------------
@@ -424,6 +469,11 @@ class Service:
             for name in ("table_id", "starts_at_local"):
                 if name in item and not isinstance(item[name], str):
                     raise invalid(f"{name} must be a string")
+            if "table_ids" in item and (not isinstance(item["table_ids"], list) or not all(
+                    isinstance(t, str) for t in item["table_ids"])):
+                raise invalid("table_ids must be an array of strings")
+            if "table_id" in item and "table_ids" in item:
+                raise invalid("send either table_id or table_ids, not both")
             if "party_size" in item and not is_int(item["party_size"]):
                 raise invalid("party_size must be an integer")
 
@@ -438,24 +488,24 @@ class Service:
             elif res.restaurant_id != restaurant.id:
                 raise invalid("all moved reservations must belong to the same restaurant")
             self._amendable(res)
-            table_id, local, party, changed = self._amended_values(res, item)
+            table_ids, local, party, changed = self._amended_values(res, item, invalid)
             start = res.starts_utc
             if changed:
-                start = self._check_booking(restaurant, table_id, local, party)
-            planned.append((res, table_id, local, party, start, changed))
+                start = self._check_booking(restaurant, table_ids, local, party)
+            planned.append((res, table_ids, local, party, start, changed))
 
         listed = {p[0].id for p in planned}
         duration = timedelta(minutes=restaurant.duration)
-        for i, (res, table_id, _, _, start, changed) in enumerate(planned):
-            if changed and self._overlaps(restaurant, table_id, start, exclude=listed):
+        for i, (res, table_ids, _, _, start, changed) in enumerate(planned):
+            if changed and self._overlaps(restaurant, table_ids, start, exclude=listed):
                 raise self._unavailable()
             for other in planned[i + 1:]:
-                if not (changed or other[5]) or other[1] != table_id:
+                if not (changed or other[5]) or set(other[1]).isdisjoint(table_ids):
                     continue
                 if other[4] < start + duration and start < other[4] + duration:
                     raise self._unavailable()
 
-        for res, table_id, local, party, start, changed in planned:
+        for res, table_ids, local, party, start, changed in planned:
             if changed:
-                self._apply(res, table_id, local, party, start)
+                self._apply(res, table_ids, local, party, start)
         return {"reservations": [self._view(p[0]) for p in planned]}

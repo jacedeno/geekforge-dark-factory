@@ -29,7 +29,10 @@ class AvailabilityTest(ServiceTest):
             "18:00", "18:30", "19:00", "19:30", "20:00", "20:30", "21:00", "21:30")])
         self.assertEqual(body["slots"][0], {"starts_at_local": "2026-09-24T18:00",
                                             "starts_at": "2026-09-24T18:00:00+02:00",
-                                            "available_table_ids": ["t_2", "t_3"]})
+                                            "available_table_ids": ["t_2", "t_3"],
+                                            "available_options": [
+                                                {"table_ids": ["t_2"], "capacity": 4},
+                                                {"table_ids": ["t_3"], "capacity": 6}]})
 
     def test_closed_day_and_empty_lists(self):
         self.assertEqual(self.slots("r_anker", "2026-09-27")["slots"], [])

@@ -10,7 +10,8 @@ from . import clock
 from .errors import invalid
 from .passwords import hash_password, parse_hash
 
-STATE_SCHEMA = 1
+STATE_SCHEMA = 2
+STAGE_1_SCHEMA = 1  # exports of the stage-1 service: single tables, no combinable pairs
 STATUSES = ("confirmed", "cancelled")
 REFERENCE_RE = re.compile(r"[A-Z0-9]{6,12}")
 
@@ -36,6 +37,28 @@ class Restaurant:
     hours: list
     tables: list  # fixture-shaped dicts, in fixture order
     capacity: dict  # table id -> capacity
+    combinable: list  # declared pairs, fixture order, each as given
+
+    def pair(self, ids):
+        """The declared pair holding exactly these two tables, in combinable order, or None."""
+        wanted = set(ids)
+        for p in self.combinable:
+            if set(p) == wanted:
+                return list(p)
+        return None
+
+    def options(self):
+        """Every bookable table set: singles in fixture order, then distinct declared pairs."""
+        sets = [[t["id"]] for t in self.tables]
+        seen = set()
+        for p in self.combinable:
+            if frozenset(p) not in seen:
+                seen.add(frozenset(p))
+                sets.append(list(p))
+        return sets
+
+    def seats(self, table_ids):
+        return sum(self.capacity[t] for t in table_ids)
 
     def summary(self):
         return {"id": self.id, "name": self.name, "timezone": self.timezone}
@@ -51,6 +74,7 @@ class Restaurant:
             "opening_hours": [{"weekday": w.weekday, "opens": w.opens_text, "closes": w.closes_text}
                               for w in self.hours],
             "tables": [dict(t) for t in self.tables],
+            "combinable": [list(p) for p in self.combinable],
         }
 
 
@@ -68,7 +92,7 @@ class Reservation:
     reference: str
     user_id: str
     restaurant_id: str
-    table_id: str
+    table_ids: list  # one table, or a declared pair in combinable order
     party_size: int
     status: str
     starts_local: datetime  # naive wall-clock time at the restaurant
@@ -79,11 +103,11 @@ class Reservation:
         return self.starts_utc + timedelta(minutes=restaurant.duration)
 
     def view(self, restaurant):
-        return {
+        view = {
             "reservation_id": self.id,
             "reference": self.reference,
             "restaurant_id": self.restaurant_id,
-            "table_id": self.table_id,
+            "table_ids": list(self.table_ids),
             "party_size": self.party_size,
             "status": self.status,
             "starts_at_local": clock.format_local(self.starts_local),
@@ -91,6 +115,9 @@ class Reservation:
             "ends_at": clock.render(self.ends_utc(restaurant), restaurant.zone),
             "created_at": clock.render_utc(self.created_at),
         }
+        if len(self.table_ids) == 1:
+            view["table_id"] = self.table_ids[0]
+        return view
 
 
 @dataclass
@@ -130,7 +157,7 @@ class State:
             "restaurants": [r.detail() for r in self.restaurants.values()],
             "reservations": [{
                 "id": r.id, "reference": r.reference, "user_id": r.user_id,
-                "restaurant_id": r.restaurant_id, "table_id": r.table_id,
+                "restaurant_id": r.restaurant_id, "table_ids": list(r.table_ids),
                 "party_size": r.party_size, "status": r.status,
                 "starts_at_local": clock.format_local(r.starts_local),
                 "created_at": clock.render_utc(r.created_at),
@@ -220,7 +247,15 @@ def _restaurant(raw):
         table["capacity"] = cap
         tables.append(table)
         capacity[tid] = cap
-    return Restaurant(rid, name, tz, zone, slot, duration, cutoff, hours, tables, capacity)
+    combinable = []
+    for p in _list(raw, "combinable"):
+        if (not isinstance(p, list) or len(p) != 2 or not all(isinstance(t, str) for t in p)
+                or p[0] == p[1] or not all(t in capacity for t in p)):
+            raise invalid("combinable entries must be pairs of two distinct tables of the "
+                          "restaurant")
+        combinable.append(list(p))
+    return Restaurant(rid, name, tz, zone, slot, duration, cutoff, hours, tables, capacity,
+                      combinable)
 
 
 def _created_at(raw, default):
@@ -238,7 +273,18 @@ def _created_at(raw, default):
     return dt.astimezone(timezone.utc).replace(microsecond=0)
 
 
-def _reservation(raw, state, default_created, statuses):
+def _seeded_tables(raw, restaurant):
+    """`table_id` or `table_ids` (one table or two distinct tables) of a seeded reservation."""
+    if ("table_id" in raw) == ("table_ids" in raw):
+        raise invalid("a reservation needs exactly one of table_id and table_ids")
+    ids = [_id(raw, "table_id")] if "table_id" in raw else raw["table_ids"]
+    if (not isinstance(ids, list) or not 1 <= len(ids) <= 2 or len(set(map(str, ids))) != len(ids)
+            or not all(isinstance(t, str) and t in restaurant.capacity for t in ids)):
+        raise invalid("reservation tables must be one or two distinct tables of the restaurant")
+    return (restaurant.pair(ids) or list(ids)) if len(ids) == 2 else list(ids)
+
+
+def _reservation(raw, state, default_created, legacy=False):
     _obj(raw, "reservation")
     rid = _id(raw, "id")
     reference = raw.get("reference")
@@ -246,21 +292,23 @@ def _reservation(raw, state, default_created, statuses):
         raise invalid("reference must be 6 to 12 characters of A-Z0-9")
     user_id = _id(raw, "user_id")
     restaurant_id = _id(raw, "restaurant_id")
-    table_id = _id(raw, "table_id")
     restaurant = state.restaurants.get(restaurant_id)
-    if restaurant is None or table_id not in restaurant.capacity:
-        raise invalid("reservation refers to an unknown restaurant or table")
+    if restaurant is None:
+        raise invalid("reservation refers to an unknown restaurant")
+    if legacy and "table_ids" in raw:
+        raise invalid("stage-1 reservations carry table_id only")
+    table_ids = _seeded_tables(raw, restaurant)
     party = _int(raw, "party_size", 1)
     local = clock.parse_local(raw.get("starts_at_local"))
     if local is None:
         raise invalid("starts_at_local must be YYYY-MM-DDTHH:MM")
-    status = raw.get("status", "confirmed") if statuses else "confirmed"
+    status = raw.get("status", "confirmed")
     if status not in STATUSES:
         raise invalid("unknown reservation status")
     if rid in state.reservations or reference in state.references:
         raise invalid("duplicate reservation id or reference")
     utc, _ = clock.resolve(restaurant.zone, local)
-    return Reservation(rid, reference, user_id, restaurant_id, table_id, party, status, local, utc,
+    return Reservation(rid, reference, user_id, restaurant_id, table_ids, party, status, local, utc,
                        _created_at(raw, default_created))
 
 
@@ -301,7 +349,7 @@ def from_fixture(fixture):
     _add_restaurants(state, restaurants)
     now = clock.now_utc().replace(microsecond=0)
     for raw in reservations:
-        state.add_reservation(_reservation(raw, state, now, statuses=False))
+        state.add_reservation(_reservation(raw, state, now))
     # Structure is validated before any slow hashing happens.
     for u in users:
         _add_user(state, u["id"], u["email"], u["display_name"], "")
@@ -320,8 +368,9 @@ def from_export(doc):
     if not is_int(doc.get("format_version")) or doc["format_version"] != 1:
         raise invalid("format_version must be 1")
     raw = _obj(doc.get("state"), "state")
-    if not is_int(raw.get("schema")) or raw["schema"] != STATE_SCHEMA:
+    if not is_int(raw.get("schema")) or raw["schema"] not in (STAGE_1_SCHEMA, STATE_SCHEMA):
         raise invalid("unsupported state schema")
+    legacy = raw["schema"] == STAGE_1_SCHEMA
 
     state = State()
     for u in _list(raw, "users", required=True):
@@ -338,7 +387,7 @@ def from_export(doc):
     _add_restaurants(state, _list(raw, "restaurants", required=True))
     now = clock.now_utc().replace(microsecond=0)
     for r in _list(raw, "reservations", required=True):
-        state.add_reservation(_reservation(r, state, now, statuses=True))
+        state.add_reservation(_reservation(r, state, now, legacy=legacy))
     for i in _list(raw, "idempotency", required=True):
         _obj(i, "idempotency record")
         rec = IdempotencyRecord(_id(i, "user_id"), _str(i, "key"), _str(i, "method"),

@@ -33,12 +33,13 @@ class ReservationTest(ServiceTest):
     def test_create_shape(self):
         status, body, _ = self.book(self.ada)
         self.assertEqual(status, 201, body)
-        self.assertEqual(set(body), {"reservation_id", "reference", "restaurant_id", "table_id",
+        self.assertEqual(set(body), {"reservation_id", "reference", "restaurant_id", "table_id", "table_ids",
                                      "party_size", "status", "starts_at_local", "starts_at",
                                      "ends_at", "created_at"})
         self.assertRegex(body["reference"], r"^[A-Z0-9]{6,12}$")
         self.assertLessEqual(len(body["reservation_id"]), 64)
         self.assertEqual(body["status"], "confirmed")
+        self.assertEqual((body["table_id"], body["table_ids"]), ("t_2", ["t_2"]))
         self.assertEqual(body["starts_at"], f"{FUTURE}T19:00:00+02:00")
         self.assertEqual(body["ends_at"], f"{FUTURE}T20:30:00+02:00")
         self.assertTrue(re.fullmatch(r"\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\+00:00", body["created_at"]))

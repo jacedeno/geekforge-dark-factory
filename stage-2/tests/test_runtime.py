@@ -50,7 +50,7 @@ class RuntimeTest(ServiceTest):
         self.reset()
         status, body, _ = self.client.get("/restaurants/r_anker")
         self.assertEqual(status, 200)
-        expected = dict(FIXTURE["restaurants"][0])
+        expected = dict(FIXTURE["restaurants"][0], combinable=[])
         self.assertEqual(body, expected)
         self.assertError(self.client.get("/restaurants/nope"), 404, "not_found")
 
