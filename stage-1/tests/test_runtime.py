@@ -58,6 +58,13 @@ class RuntimeTest(ServiceTest):
         self.assertError(self.client.get("/nope"), 404, "not_found")
         self.assertError(self.client.call("DELETE", "/restaurants"), 405, "method_not_allowed")
         self.assertError(self.client.post("/health", {}), 405, "method_not_allowed")
+        for method in ("TRACE", "CONNECT", "PURGE", "HEAD", "OPTIONS", "PUT"):
+            with self.subTest(method=method):
+                status, _, _ = self.client.call(method, "/restaurants")
+                self.assertEqual(status, 405)
+                if method != "HEAD":
+                    self.assertError(self.client.call(method, "/restaurants"), 405,
+                                     "method_not_allowed")
 
     def test_seeded_reservation_blocks_table(self):
         seeded = {"id": "res_seed", "reference": "SEED0001", "user_id": "u_bob",

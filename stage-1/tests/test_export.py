@@ -44,6 +44,15 @@ class ExportTest(ServiceTest):
         self.assertEqual(len(reservations), 2)
         self.assertEqual(self.export()["state"]["restaurants"], snapshot["state"]["restaurants"])
 
+    def test_import_accepts_every_fixture_it_exported(self):
+        user = {"id": "u_e", "email": "e@x.io", "password": "correct horse", "display_name": ""}
+        f = {"users": [user], "restaurants": [], "reservations": []}
+        self.reset(f)
+        snapshot = self.export()
+        self.assertEqual(self.client.post("/_test/import", snapshot)[0], 204)
+        self.assertEqual(self.export(), snapshot)
+        self.login("e@x.io", "correct horse")
+
     def test_export_is_a_snapshot(self):
         snapshot = self.export()
         before = copy.deepcopy(snapshot)

@@ -70,9 +70,12 @@ def make_handler(service):
 
         def send_error(self, code, message=None, explain=None):
             # Transport-level failures (bad request line, oversized headers) keep the envelope.
-            codes = {400: "malformed_request", 404: "not_found", 405: "method_not_allowed"}
-            err = ApiError(code, codes.get(code, "malformed_request" if code < 500 else
-                                           "internal_error"), message or "request rejected")
+            # They are client errors, so they never surface as 5xx.
+            if code >= 500:
+                code = 400
+            codes = {404: "not_found", 405: "method_not_allowed"}
+            err = ApiError(code, codes.get(code, "malformed_request"),
+                           message or "request rejected")
             self.close_connection = True
             try:
                 self._send(code, err.body())
@@ -128,7 +131,12 @@ def make_handler(service):
                 payload = ApiError(500, "internal_error", "internal error").body()
             self._send(status, payload)
 
-        do_GET = do_POST = do_PATCH = do_PUT = do_DELETE = do_OPTIONS = do_HEAD = _dispatch
+        def __getattr__(self, name):
+            # Every method, including ones http.server has no handler for (TRACE, CONNECT,
+            # custom verbs), goes through routing so a known route answers 405, never 501.
+            if name.startswith("do_"):
+                return self._dispatch
+            raise AttributeError(name)
 
     return Handler
 

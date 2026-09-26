@@ -264,6 +264,12 @@ def _reservation(raw, state, default_created, statuses):
                        _created_at(raw, default_created))
 
 
+def _user_fields(u):
+    """The user fields shared by reset fixtures and exports, validated by one rule."""
+    _obj(u, "user")
+    return _id(u, "id"), _str(u, "email"), _str(u, "display_name", allow_empty=True)
+
+
 def _add_user(state, uid, email, display_name, password_hash):
     if uid in state.users:
         raise invalid(f"duplicate user id {uid!r}")
@@ -286,11 +292,8 @@ def from_fixture(fixture):
     _obj(fixture, "fixture")
     users = _list(fixture, "users")
     for u in users:
-        _obj(u, "user")
-        _id(u, "id")
-        _str(u, "email")
+        _user_fields(u)
         _str(u, "password", allow_empty=True)
-        _str(u, "display_name", allow_empty=True)
     restaurants = _list(fixture, "restaurants")
     reservations = _list(fixture, "reservations")
 
@@ -322,11 +325,10 @@ def from_export(doc):
 
     state = State()
     for u in _list(raw, "users", required=True):
-        _obj(u, "user")
+        uid, email, display_name = _user_fields(u)
         if parse_hash(u.get("password_hash")) is None:
             raise invalid("invalid password hash")
-        _add_user(state, _id(u, "id"), _str(u, "email"), _str(u, "display_name"),
-                  u["password_hash"])
+        _add_user(state, uid, email, display_name, u["password_hash"])
     for t in _list(raw, "tokens", required=True):
         _obj(t, "token")
         token, uid = _str(t, "token"), _id(t, "user_id")
