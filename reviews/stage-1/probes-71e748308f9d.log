@@ -1,0 +1,9 @@
+== build verifier-probe:71e748308f9d
+sha256:b73dc872ef69d6cb66b3ae8ff4dc1dbd509f3105380f50ec3d8eff5e1dd8e3a7
+== A (PORT=9123) healthy after 0.6 s
+== B (no PORT, default 8080) healthy
+== probes
+........................................................................ [ 56%]
+.......................................................                  [100%]
+127 passed in 107.03s (0:01:47)
+== container A restarts: 0 oom=false running=true
