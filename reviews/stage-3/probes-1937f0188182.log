@@ -1,0 +1,18 @@
+== build stage-3, stage-2, stage-1 @ 1937f0188182
+== A (stage-3, PORT=9123) healthy after 1.2 s
+== B (stage-3, default 8080) healthy
+== P1 (stage-1), P2 (stage-2) healthy
+== stage-1 probes against stage-3 (regression)
+........................................................................ [ 57%]
+......................................................                   [100%]
+126 passed, 1 deselected in 93.18s (0:01:33)
+== stage-2 API probes against stage-3 (regression)
+.....................................                                    [100%]
+37 passed, 2 deselected in 6.44s
+== stage-2 browser probes against stage-3 (regression)
+.........................                                                [100%]
+25 passed in 33.56s
+== stage-3 probes
+.....................................                                    [100%]
+37 passed in 15.08s
+== container A: 0 restarts oom=false running=true

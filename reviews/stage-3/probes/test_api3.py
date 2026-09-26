@@ -766,7 +766,7 @@ def test_stage3_roundtrip():
                 ok(ada.get(f"/reservations/{x}/decision"), 200)) == views[x], x
     assert ok(ada.get(f"/series/{s['series_id']}"), 200) == cur_series
     assert ok(httpx.get(f"{BASE}/restaurants/r_anker/policies"), 200) == pols
-    assert ok(publish(ada, pol(D(14)), k=kp), 200) == p1
+    assert ok(publish(ada, pol(D(14), reservation_duration_minutes=60), k=kp), 200) == p1
     assert ok(bk(ada, k=kb), 200) == r
     assert ok(series(ada, r["reference"], count=3, k=ks), 200) == s
     err(publish(bob, pol(D())), 403, "forbidden")

@@ -1,0 +1,65 @@
+== build stage-3, stage-2, stage-1 @ 1937f0188182
+== A (stage-3, PORT=9123) healthy after 1.4 s
+== B (stage-3, default 8080) healthy
+== P1 (stage-1), P2 (stage-2) healthy
+== stage-1 probes against stage-3 (regression)
+........................................................................ [ 57%]
+......................................................                   [100%]
+126 passed, 1 deselected in 94.24s (0:01:34)
+== stage-2 API probes against stage-3 (regression)
+.....................................                                    [100%]
+37 passed, 2 deselected in 6.43s
+== stage-2 browser probes against stage-3 (regression)
+.........................                                                [100%]
+25 passed in 33.23s
+== stage-3 probes
+.................................F...                                    [100%]
+=================================== FAILURES ===================================
+____________________________ test_stage3_roundtrip _____________________________
+
+    def test_stage3_roundtrip():
+        reset(fixture(restaurants=[mrest(combinable=[["t_1", "t_2"]])]))
+        ada, bob = login(ADA), login(BOB)
+        kp, kb, ks = key(), key(), key()
+        p1 = ok(publish(ada, pol(D(14), reservation_duration_minutes=60), k=kp), 201)
+        r = ok(bk(ada, k=kb), 201)
+        ok(ada.patch(f"/reservations/{r['reference']}", json_={"party_size": 3}), 200)
+        pair = ok(bk(ada, at="21:00", tables=["t_1", "t_2"], party=5), 201)
+        s = ok(series(ada, r["reference"], count=3, k=ks), 201)
+        ok(ada.patch(f"/reservations/{s['occurrences'][1]['reference']}", json_={"party_size": 2}), 200)
+        ok(ada.post(f"/reservations/{s['occurrences'][2]['reference']}/cancel"), 200)
+        refs = [r["reference"], pair["reference"]] + [o["reference"] for o in s["occurrences"][1:]]
+        views = {x: (ok(ada.get(f"/reservations/{x}"), 200), hist(ada, x), ok(ada.get(f"/reservations/{x}/decision"), 200))
+                 for x in refs}
+        cur_series = ok(ada.get(f"/series/{s['series_id']}"), 200)
+        pols = ok(httpx.get(f"{BASE}/restaurants/r_anker/policies"), 200)
+        snap = ok(httpx.get(f"{BASE}/_test/export"), 200)
+        assert snap["state"].get("schema") not in (1, 2), "stage-3 exports need a new schema marker"
+        reset(fixture(users=[], restaurants=[]))
+        ok(imp(snap), 204)
+        ok(imp(snap), 204)
+        for x in refs:
+            assert (ok(ada.get(f"/reservations/{x}"), 200), hist(ada, x),
+                    ok(ada.get(f"/reservations/{x}/decision"), 200)) == views[x], x
+        assert ok(ada.get(f"/series/{s['series_id']}"), 200) == cur_series
+        assert ok(httpx.get(f"{BASE}/restaurants/r_anker/policies"), 200) == pols
+>       assert ok(publish(ada, pol(D(14)), k=kp), 200) == p1
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+reviews/stage-3/probes/test_api3.py:769: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+r = <Response [409 Conflict]>, status = 200
+
+    def ok(r, status):
+>       assert r.status_code == status, f"expected {status}, got {r.status_code}: {r.text[:400]}"
+E       AssertionError: expected 200, got 409: {"error": {"code": "idempotency_key_reuse", "message": "Idempotency-Key was already used with a different request body"}}
+E       assert 409 == 200
+E        +  where 409 = <Response [409 Conflict]>.status_code
+
+reviews/stage-1/probes/test_probes.py:92: AssertionError
+=========================== short test summary info ============================
+FAILED reviews/stage-3/probes/test_api3.py::test_stage3_roundtrip - Assertion...
+1 failed, 36 passed in 14.97s
+== container A: 0 restarts oom=false running=true
+exit 1
