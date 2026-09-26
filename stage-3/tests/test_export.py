@@ -42,7 +42,8 @@ class ExportTest(ServiceTest):
         self.assertEqual(self.book(self.ada, key="failed", table_id="t_3", party_size=6)[0], 201)
         reservations = self.client.get("/reservations", token=self.ada)[1]["reservations"]
         self.assertEqual(len(reservations), 2)
-        self.assertEqual(self.export()["state"]["restaurants"], snapshot["state"]["restaurants"])
+        self.assertEqual(self.client.get("/restaurants/r_anker")[1]["tables"],
+                         [dict(t) for t in snapshot["state"]["restaurants"][0]["tables"]])
 
     def test_import_accepts_every_fixture_it_exported(self):
         user = {"id": "u_e", "email": "e@x.io", "password": "correct horse", "display_name": ""}

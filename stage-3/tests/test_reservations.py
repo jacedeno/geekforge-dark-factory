@@ -34,6 +34,7 @@ class ReservationTest(ServiceTest):
         status, body, _ = self.book(self.ada)
         self.assertEqual(status, 201, body)
         self.assertEqual(set(body), {"reservation_id", "reference", "restaurant_id", "table_id", "table_ids",
+                                     "revision", "accepted_terms",
                                      "party_size", "status", "starts_at_local", "starts_at",
                                      "ends_at", "created_at"})
         self.assertRegex(body["reference"], r"^[A-Z0-9]{6,12}$")
@@ -162,7 +163,7 @@ class ReservationTest(ServiceTest):
         self.assertError(self.client.post(path, token=self.bob), 404, "not_found")
         status, body, _ = self.client.post(path, token=self.ada)
         self.assertEqual(status, 200)
-        self.assertEqual(body, dict(a, status="cancelled"))
+        self.assertEqual(body, dict(a, status="cancelled", revision=2))
         self.assertEqual(self.client.post(path, token=self.ada)[:2], (200, body))
         self.assertEqual(self.book(self.bob, key="again")[0], 201)
         self.assertError(self.client.post("/reservations/PAST0001/cancel", token=self.ada), 409,

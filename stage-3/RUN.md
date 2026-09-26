@@ -1,9 +1,9 @@
-# Running Tablekeeper (stage 2)
+# Running Tablekeeper (stage 3)
 
 Build the image and start the service on port 8080, from this directory:
 
 ```sh
-docker build -t tablekeeper-stage-2 . && docker run --rm -e PORT=8080 -p 8080:8080 tablekeeper-stage-2
+docker build -t tablekeeper-stage-3 . && docker run --rm -e PORT=8080 -p 8080:8080 tablekeeper-stage-3
 ```
 
 Open `http://localhost:8080/` for the booking screens (`/`, `/signup`, `/login`, `/lookup`); the

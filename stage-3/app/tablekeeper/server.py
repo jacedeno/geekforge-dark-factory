@@ -33,7 +33,12 @@ ROUTES = [
     (("reservations",), {"GET": "list_reservations", "POST": "create_reservation"}),
     (("reservations", None), {"GET": "get_reservation", "PATCH": "patch"}),
     (("reservations", None, "cancel"), {"POST": "cancel"}),
+    (("reservations", None, "history"), {"GET": "history"}),
+    (("reservations", None, "decision"), {"GET": "decision"}),
     (("reservation-moves",), {"POST": "moves"}),
+    (("restaurants", None, "policies"), {"GET": "list_policies", "POST": "publish_policy"}),
+    (("series",), {"POST": "create_series"}),
+    (("series", None), {"GET": "get_series"}),
 ]
 
 

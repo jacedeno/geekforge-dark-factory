@@ -231,6 +231,24 @@ class UiTest(ServiceTest):
         self.assertIn("Tafelrunde", p.inner_text(T("availability-grid")) + p.inner_text("main"))
         self.assertNotIn("Zum Anker", p.inner_text("main .results"))
 
+    def test_grid_uses_the_policy_capacities_of_the_date(self):
+        combo = dict(WEEKDAY_COMBO, manager_user_ids=["u_bob"])
+        self.reset(fixture(restaurants=[combo] + FIXTURE["restaurants"]))
+        bob = self.client.post("/auth/login", {"email": "bob@example.com",
+                                               "password": "battery staple"})[1]["token"]
+        policy = {"effective_from": FUTURE, "slot_minutes": 30, "reservation_duration_minutes": 90,
+                  "cancellation_cutoff_minutes": 60,
+                  "opening_hours": [{"weekday": "thu", "opens": "18:00", "closes": "22:00"}],
+                  "capacities": {"t_1": 2, "t_2": 2, "t_3": 4}}
+        status, _, _ = self.client.post("/restaurants/r_combo/policies", policy, token=bob, key="p")
+        self.assertEqual(status, 201)
+        p = self.page
+        self.search(party=5)
+        p.wait_for_selector(T("slot-t_2+t_3-19:00"))
+        self.assertEqual(p.locator(T("slot-t_2+t_1-19:00")).count(), 0)
+        self.search(date="2030-09-19", party=5)  # before the policy: fixture capacities
+        p.wait_for_selector(T("slot-t_2+t_1-19:00"))
+
     def test_no_horizontal_scroll_on_small_screens(self):
         p = self.page
         p.set_viewport_size({"width": 375, "height": 800})

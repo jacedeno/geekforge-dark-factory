@@ -216,11 +216,13 @@ class UpgradeTest(ServiceTest):
         self.assertEqual(self.client.post("/reservations", request, token=token, key="lost")[:2],
                          (200, original))
         found = self.client.get("/reservations/OLDREF01", token=token)[1]
-        self.assertEqual(found, dict(original, table_ids=["t_2"]))
+        terms = found.pop("accepted_terms")
+        self.assertEqual(found, dict(original, table_ids=["t_2"], revision=1))
+        self.assertEqual(terms["policy_version"], 0)
         self.assertEqual(self.client.get("/restaurants/r_anker")[1]["combinable"], [])
         self.login()
         exported = self.client.get("/_test/export")[1]
-        self.assertEqual(exported["state"]["schema"], 2)
+        self.assertEqual(exported["state"]["schema"], 3)
         self.assertEqual(self.client.post("/_test/import", exported)[0], 204)
         legacy = copy.deepcopy(doc)
         legacy["state"]["reservations"][0]["table_ids"] = ["t_2"]

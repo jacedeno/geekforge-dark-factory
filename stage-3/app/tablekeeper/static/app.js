@@ -439,15 +439,20 @@
     renderResults();
     const qs = new URLSearchParams({ restaurant_id: params.restaurantId, date: params.date,
       party_size: String(params.party) });
-    const [detail, availability] = await Promise.all([
-      api("GET", `/restaurants/${encodeURIComponent(params.restaurantId)}`),
+    const rid = encodeURIComponent(params.restaurantId);
+    const [detail, availability, policies] = await Promise.all([
+      api("GET", `/restaurants/${rid}`),
       api("GET", `/availability?${qs}`),
+      api("GET", `/restaurants/${rid}/policies`),
     ]);
     if (seq !== search.seq) return; // a later search has started: never apply an older response
     search.refreshing = false;
     if (detail.kind === "response" && detail.status === 200 && availability.kind === "response" &&
         availability.status === 200 && availability.data && Array.isArray(availability.data.slots)) {
-      search.view = { status: "ready", params, restaurant: detail.data,
+      const published = policies.kind === "response" && policies.status === 200 && policies.data &&
+        Array.isArray(policies.data.policies) ? policies.data.policies : [];
+      search.view = { status: "ready", params,
+        restaurant: withPolicyCapacities(detail.data, published, params.date),
         slots: availability.data.slots };
     } else {
       const notFound = detail.status === 404 || availability.status === 404;
@@ -456,6 +461,24 @@
         "We couldn't load availability just now. Please try again." };
     }
     renderResults();
+  }
+
+  // The policy for a date: greatest effective_from not later than it, ties by version; without
+  // one, the restaurant's own rules apply. Table capacities shown and used for joined options
+  // follow that policy.
+  function withPolicyCapacities(restaurant, policies, date) {
+    let best = null;
+    for (const p of policies) {
+      if (typeof p.effective_from !== "string" || p.effective_from > date) continue;
+      if (!best || p.effective_from > best.effective_from ||
+          (p.effective_from === best.effective_from && p.policy_version > best.policy_version)) {
+        best = p;
+      }
+    }
+    if (!best || !best.capacities) return restaurant;
+    return Object.assign({}, restaurant, { tables: (restaurant.tables || []).map((t) =>
+      Object.assign({}, t, { capacity: typeof best.capacities[t.id] === "number" ?
+        best.capacities[t.id] : t.capacity })) });
   }
 
   function refreshSearch() {

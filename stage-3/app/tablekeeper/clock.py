@@ -84,45 +84,45 @@ def day_start(day):
     return datetime(day.year, day.month, day.day)
 
 
-def windows_for(restaurant, day):
-    """Opening-hour entries of the restaurant for the weekday of `day`."""
+def windows_for(terms, day):
+    """Opening-hour entries of a policy for the weekday of `day`."""
     weekday = WEEKDAYS[day.weekday()]
-    return [h for h in restaurant.hours if h.weekday == weekday]
+    return [h for h in terms.hours if h.weekday == weekday]
 
 
-def close_instant(restaurant, day, window):
-    utc, _ = resolve(restaurant.zone, day_start(day) + timedelta(minutes=window.closes))
+def close_instant(zone, day, window):
+    utc, _ = resolve(zone, day_start(day) + timedelta(minutes=window.closes))
     return utc
 
 
-def slots(restaurant, day):
-    """Bookable slot starts for a local date: list of (local_naive, utc_instant), in time order."""
-    duration = timedelta(minutes=restaurant.duration)
+def slots(zone, terms, day):
+    """Bookable slot starts for a local date under a policy: list of (local_naive, utc_instant)."""
+    duration = timedelta(minutes=terms.duration)
     found = {}
-    for window in windows_for(restaurant, day):
-        closes = close_instant(restaurant, day, window)
+    for window in windows_for(terms, day):
+        closes = close_instant(zone, day, window)
         minute = window.opens
         while minute <= window.closes:
             local = day_start(day) + timedelta(minutes=minute)
-            utc, exists = resolve(restaurant.zone, local)
+            utc, exists = resolve(zone, local)
             if exists and utc + duration <= closes:
                 found[minute] = (local, utc)
-            minute += restaurant.slot_minutes
+            minute += terms.slot_minutes
     return [found[m] for m in sorted(found)]
 
 
-def check_start(restaurant, local):
-    """Validate a requested start. Returns (utc_instant, None) or (None, error_code)."""
-    utc, exists = resolve(restaurant.zone, local)
+def check_start(zone, terms, local):
+    """Validate a requested start under a policy. Returns (utc_instant, None) or (None, code)."""
+    utc, exists = resolve(zone, local)
     if not exists:
         return None, "invalid_local_time"
     day = local.date()
     minute = local.hour * 60 + local.minute
-    end = utc + timedelta(minutes=restaurant.duration)
-    within = [w for w in windows_for(restaurant, day)
-              if minute >= w.opens and end <= close_instant(restaurant, day, w)]
+    end = utc + timedelta(minutes=terms.duration)
+    within = [w for w in windows_for(terms, day)
+              if minute >= w.opens and end <= close_instant(zone, day, w)]
     if not within:
         return None, "outside_opening_hours"
-    if not any((minute - w.opens) % restaurant.slot_minutes == 0 for w in within):
+    if not any((minute - w.opens) % terms.slot_minutes == 0 for w in within):
         return None, "not_on_slot_grid"
     return utc, None
