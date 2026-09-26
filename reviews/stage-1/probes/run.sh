@@ -12,7 +12,7 @@ here="$(cd "$(dirname "$0")" && pwd)"
 repo="$(git -C "$here" rev-parse --show-toplevel)"
 commit="${1:?usage: run.sh <commit> [pytest args]}"; shift
 py=/home/geekendzone/hackathon/dark-factory-wearedevs/.venv/bin/python
-clean_env=(env -u PYTHONHOME -u PYTHONPATH)
+clean_env=(env -u PYTHONHOME -u PYTHONPATH -u LD_LIBRARY_PATH)
 
 sha="$(git -C "$repo" rev-parse --verify "$commit^{commit}")" || exit 2
 tag="verifier-probe:${sha:0:12}"
