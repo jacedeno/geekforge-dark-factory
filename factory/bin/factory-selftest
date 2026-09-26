@@ -1,0 +1,85 @@
+#!/usr/bin/env bash
+# Prove the factory's own guard rails work on this machine before trusting a run to them.
+#
+#   factory-selftest [--no-container]
+#
+# Checks: mandates are generic and name their harness and model, the seat guard allows and
+# refuses the right calls, the git hooks refuse credentials and attribution and keep each seat's
+# commits in its directory, and (unless --no-container) the clean-container check passes an
+# offline-buildable service and fails one that downloads at build time.
+set -uo pipefail
+here="$(cd "$(dirname "$0")" && pwd)"
+root="$(dirname "$(dirname "$here")")"
+tmp="$(mktemp -d)"; trap 'rm -rf "$tmp"' EXIT
+pass=0 fail=0
+check() {  # description, expected exit, command...
+  local desc="$1" want="$2"; shift 2
+  "$@" >"$tmp/out" 2>&1; local got=$?
+  if [[ "$got" == "$want" ]]; then pass=$((pass + 1)); printf 'PASS  %s\n' "$desc"
+  else fail=$((fail + 1)); printf 'FAIL  %s (exit %s, wanted %s)\n' "$desc" "$got" "$want"; sed 's/^/      /' "$tmp/out" | tail -5; fi
+}
+
+# 1. mandates
+check "mandates are generic" 0 "$here/factory-lint-mandates"
+printf 'Return 409 with SLOT_TAKEN from /api/items/{id}.\n' > "$tmp/bad.md"
+check "lint catches problem-specific detail" 1 "$here/factory-lint-mandates" "$tmp/bad.md"
+for m in "$root"/mandates/*.md; do
+  check "$(basename "$m") names its harness and model" 0 bash -c "grep -q '^Harness: ' '$m' && grep -q '^Model: ' '$m'"
+done
+
+# 2. seat guard
+repo="$tmp/result"; state="$tmp/result.state"; mkdir -p "$repo" "$state"
+printf 'STAGE_DIR=stage-1\n' > "$state/run.env"
+guard() {  # role, payload
+  (cd "$repo" && FACTORY_ROLE="$1" FACTORY_REPO="$repo" FACTORY_STATE="$state" \
+    python3 "$root/factory/hooks/guard.py" <<< "$2")
+}
+w() { printf '{"tool_name":"Write","tool_input":{"file_path":"%s"}}' "$1"; }
+b() { printf '{"tool_name":"Bash","tool_input":{"command":"%s"}}' "$1"; }
+check "builder writes inside the increment" 0 guard builder "$(w "$repo/stage-1/app.py")"
+check "builder cannot write another increment" 2 guard builder "$(w "$repo/stage-2/app.py")"
+check "builder cannot write a mandate" 2 guard builder "$(w "$repo/mandates/builder.md")"
+check "planner writes its plans" 0 guard planner "$(w "$repo/plans/stage-1/brief.md")"
+check "planner cannot write code" 2 guard planner "$(w "$repo/stage-1/app.py")"
+check "verifier writes its reviews" 0 guard verifier "$(w "$repo/reviews/stage-1/r.md")"
+check "verifier cannot write code" 2 guard verifier "$(w "$repo/stage-1/app.py")"
+check "writes outside the repository pass" 0 guard verifier "$(w "/tmp/probe.py")"
+check "no seat pushes" 2 guard builder "$(b "git push origin HEAD")"
+check "no seat switches branches" 2 guard verifier "$(b "git checkout abc123")"
+check "no seat amends" 2 guard builder "$(b "git commit --amend -m x")"
+check "no seat skips git hooks" 2 guard builder "$(b "git commit --no-verify -m x")"
+check "no seat reads secret stores" 2 guard builder "$(b "cat ~/.ssh/id_ed25519")"
+check "no seat removes identities" 2 guard planner "$(b "jam rm --as someone")"
+check "restoring a file passes" 0 guard builder "$(b "git checkout -- stage-1/app.py")"
+check "ordinary commands pass" 0 guard builder "$(b "python3 -m unittest")"
+
+# 3. git hooks
+g="$tmp/repo"; git init -q "$g"
+git -C "$g" config core.hooksPath "$root/factory/git-hooks"
+git -C "$g" config user.email selftest@example.invalid; git -C "$g" config user.name selftest
+echo ok > "$g/a.txt"; git -C "$g" add a.txt
+check "commit-msg refuses attribution" 1 git -C "$g" commit -q -m $'x\n\nCo-Authored-By: Claude <noreply@anthropic.com>'
+check "clean commit passes" 0 git -C "$g" commit -q -m "Add a"
+echo "token=ghp_$(printf 'a%.0s' {1..36})" > "$g/b.txt"; git -C "$g" add b.txt
+check "pre-commit refuses a credential" 1 git -C "$g" commit -q -m "Add b"
+git -C "$g" rm -q --cached b.txt; rm "$g/b.txt"
+seat() { local role="$1"; shift; env FACTORY_ROLE="$role" FACTORY_REPO="$repo" FACTORY_STATE="$state" "$@"; }
+mkdir -p "$g/stage-1" "$g/plans" "$g/reviews"
+echo x > "$g/outside.txt"; git -C "$g" add outside.txt
+check "pre-commit keeps the builder in its increment" 1 seat builder git -C "$g" commit -q -m "Add outside"
+git -C "$g" rm -q --cached outside.txt
+echo x > "$g/stage-1/app.py"; git -C "$g" add stage-1/app.py
+check "builder commits its increment" 0 seat builder git -C "$g" commit -q -m "Add app"
+echo x > "$g/plans/p.md"; git -C "$g" add plans/p.md
+check "planner commits its plans" 0 seat planner git -C "$g" commit -q -m "Add plan"
+echo y > "$g/stage-1/app.py"; git -C "$g" add stage-1/app.py
+check "verifier cannot commit code" 1 seat verifier git -C "$g" commit -q -m "Fix app"
+
+# 4. clean container
+if [[ "${1:-}" != "--no-container" ]]; then
+  check "offline-buildable service passes" 0 "$root/docker/cleanroom.sh" "$root/factory/selftest/sample-service" --health /health
+  check "build-time download fails" 1 "$root/docker/cleanroom.sh" "$root/factory/selftest/needs-network" --health /health
+fi
+
+printf '\n%d passed, %d failed\n' "$pass" "$fail"
+[[ $fail -eq 0 ]]

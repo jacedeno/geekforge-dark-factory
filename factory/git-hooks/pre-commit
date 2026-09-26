@@ -1,0 +1,83 @@
+#!/usr/bin/env python3
+"""Refuse commits that leak credentials, and seat commits that leave the seat's scope.
+
+Applies to every commit made in this repository (core.hooksPath=factory/git-hooks).
+Inside a factory seat (FACTORY_ROLE set) it also keeps each seat's commits inside its own
+directory: the builder in the current increment directory, the planner in plans/, the verifier
+in reviews/.
+"""
+import os
+import re
+import shlex
+import subprocess
+import sys
+
+SECRET = re.compile(
+    r"(-----BEGIN [A-Z ]*PRIVATE KEY-----"
+    r"|AKIA[0-9A-Z]{16}"
+    r"|\bgh[pousr]_[A-Za-z0-9]{30,}"
+    r"|\bgithub_pat_[A-Za-z0-9_]{40,}"
+    r"|\bsk-(ant-|proj-)?[A-Za-z0-9_-]{24,}"
+    r"|\bband_[a-z]_[A-Za-z0-9]{16,}"
+    r"|\bxox[abprs]-[A-Za-z0-9-]{10,}"
+    r"|\bAIza[0-9A-Za-z_-]{35})"
+)
+SECRET_FILES = re.compile(r"(^|/)(\.env(\..*)?|.*\.pem|.*\.key|id_(rsa|ed25519)|\.credentials\.json)$")
+
+
+def git(*args: str) -> str:
+    return subprocess.run(["git", *args], check=True, capture_output=True, text=True).stdout
+
+
+def fail(msg: str) -> None:
+    print(f"pre-commit: {msg}", file=sys.stderr)
+    sys.exit(1)
+
+
+def run_env() -> dict:
+    env = {}
+    repo = os.environ.get("FACTORY_REPO", "")
+    state = os.environ.get("FACTORY_STATE") or (repo.rstrip("/") + ".state" if repo else "")
+    try:
+        with open(os.path.join(state, "run.env")) as fh:
+            for line in fh:
+                if "=" in line and not line.startswith("#"):
+                    key, value = line.rstrip("\n").split("=", 1)
+                    parts = shlex.split(value)
+                    env[key] = parts[0] if parts else ""
+    except (OSError, ValueError):
+        pass
+    return env
+
+
+def main() -> None:
+    staged = [f for f in git("diff", "--cached", "--name-only", "--diff-filter=ACMR").splitlines() if f]
+
+    for f in staged:
+        if SECRET_FILES.search(f) and not f.endswith(".example"):
+            fail(f"refusing to commit a credential-shaped file: {f}")
+    added = [l[1:] for l in git("diff", "--cached", "-U0", "--no-color").splitlines()
+             if l.startswith("+") and not l.startswith("+++")]
+    for line in added:
+        if SECRET.search(line):
+            fail("a staged line looks like a credential; remove it (secrets never enter this repo)")
+
+    role = os.environ.get("FACTORY_ROLE")
+    if not role:
+        return
+    scope = {"planner": "plans", "verifier": "reviews"}.get(role)
+    if role == "builder":
+        scope = run_env().get("STAGE_DIR", "").rstrip("/")
+        if not scope:
+            fail("no current increment in run.env; the builder's scope is unknown")
+    if not scope:
+        fail(f"the {role} seat does not commit")
+    everything = [f for f in git("diff", "--cached", "--name-only").splitlines() if f]
+    outside = [f for f in everything if not (f == scope or f.startswith(scope + "/"))]
+    if outside:
+        fail(f"the {role} may only commit inside {scope}/. Outside: " + ", ".join(outside)
+             + f". Commit with an explicit path: git commit -m <message> -- {scope}")
+
+
+if __name__ == "__main__":
+    main()

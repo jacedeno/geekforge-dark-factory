@@ -1,0 +1,107 @@
+#!/usr/bin/env bash
+# Create, inspect or remove the band: three headless seats that Jam runs itself, and their room.
+#
+#   factory-seats create --repo <result-dir> [--room-name <name>] [--effort <level>]
+#   factory-seats status [--repo <result-dir>]
+#   factory-seats remove [--repo <result-dir>]
+#
+# create: for each role, writes a launcher (<repo>.state/bin/seat-<role>) that sets the seat's
+# identity (role, git author, Jam session) and starts Claude Code; registers a Jam-owned agent
+# named exactly after the role, with the mandate live-linked as its owner instructions, the model
+# named on the mandate's `Model:` line, permission prompts bypassed (the guard hook is the
+# boundary) and no way to ask the owner a question; then opens one room with the three seats and
+# the owner, and records it in <repo>.state/run.env.
+set -euo pipefail
+source "$(dirname "$0")/_lib.sh"
+
+cmd="${1:-}"; shift || true
+repo="" room_name="factory" effort=""
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --repo) repo="$2"; shift 2 ;;
+    --room-name) room_name="$2"; shift 2 ;;
+    --effort) effort="$2"; shift 2 ;;
+    -h|--help) sed -n '2,15p' "$0"; exit 0 ;;
+    *) die "unknown argument: $1" ;;
+  esac
+done
+command -v jam >/dev/null || die "jam is not on PATH"
+
+owner_line="$(jam whoami)"
+owner="$(grep -oE '@[a-z0-9_-]+' <<< "$owner_line" | head -1 | tr -d @)"
+owner_id="$(grep -oE '[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}' <<< "$owner_line" | tail -1)"
+[[ -n "$owner" && -n "$owner_id" ]] || die "could not read the Band account from 'jam whoami'"
+
+seat_exists() { jam list 2>/dev/null | grep -q "^$owner/$1 "; }
+
+case "$cmd" in
+create)
+  [[ -n "$repo" ]] || die "--repo is required"
+  repo="$(cd "$repo" && pwd)"
+  FACTORY_REPO="$repo"; state="$(factory_state)"
+  for role in "${FACTORY_ROLES[@]}"; do
+    seat_exists "$role" && die "a seat named $role already exists; run: factory-seats remove"
+    [[ -f "$repo/mandates/$role.md" ]] || die "missing $repo/mandates/$role.md"
+  done
+  claude_bin="$(command -v claude)" || die "claude is not on PATH"
+  jam_dir="$(dirname "$(command -v jam)")"
+  mkdir -p "$state/bin" "$state/checks"
+  : > "$state/run.env"
+  factory_set_run_env REPO "$repo"
+  factory_set_run_env OWNER "$owner"
+  factory_set_run_env OWNER_ID "$owner_id"
+
+  for role in "${FACTORY_ROLES[@]}"; do
+    mandate="$repo/mandates/$role.md"
+    model="$(sed -n 's/^Model:[[:space:]]*//p' "$mandate" | head -1)"
+    [[ -n "$model" ]] || die "$mandate has no Model: line"
+    launcher="$state/bin/seat-$role"
+    cat > "$launcher" <<EOF
+#!/usr/bin/env bash
+# Launcher for the $role seat, written by factory-seats. Jam starts it in place of claude.
+export FACTORY_ROLE=$role FACTORY_REPO=$(printf %q "$repo") FACTORY_STATE=$(printf %q "$state")
+export JAM_SESSION=factory-$role
+export GIT_AUTHOR_NAME=$role GIT_COMMITTER_NAME=$role
+export GIT_AUTHOR_EMAIL=$role@factory.invalid GIT_COMMITTER_EMAIL=$role@factory.invalid
+export BASH_DEFAULT_TIMEOUT_MS=1200000 BASH_MAX_TIMEOUT_MS=3600000
+export PATH=$(printf %q "$repo/factory/bin"):$(printf %q "$jam_dir"):\$PATH
+exec $(printf %q "$claude_bin") "\$@"
+EOF
+    chmod +x "$launcher"
+    args=(--session "factory-$role" --name "$role" --cwd "$repo"
+          --description "Factory seat: $role"
+          --transport claude-code-cli --runtime-auth subscription --runtime-model "$model"
+          --claude-permission-mode bypassPermissions --claude-context-mode local_config
+          --claude-disallowed-tool AskUserQuestion
+          --spawn-command "$launcher" --instructions-file "$mandate")
+    [[ -n "$effort" ]] && args+=(--runtime-effort "$effort")
+    (cd "$repo" && jam agent create "${args[@]}" >/dev/null)
+    note "seat   $owner/$role  model=$model"
+  done
+
+  room="$(jam --as "$owner/planner" chat new --with "$owner/builder" --with "$owner/verifier" \
+          | grep -oE '[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}' | head -1)"
+  [[ -n "$room" ]] || die "could not create the room"
+  jam --as "$owner/planner" chat add "$room" "$owner_id" >/dev/null
+  # Band lets only a human owner rename a room, and the planner created this one: best effort.
+  jam room rename "$room" "$room_name" >/dev/null 2>&1 || note "room not renamed (Band allows only its human owner)"
+  factory_set_run_env ROOM_ID "$room"
+  jam room participants "$room" >&2
+  note "room   $room ($room_name)"
+  note "state  $state/run.env"
+  ;;
+status)
+  jam list | grep -E "^$owner/($(IFS='|'; echo "${FACTORY_ROLES[*]}")) " || note "no seats"
+  if [[ -n "$repo" ]]; then FACTORY_REPO="$(cd "$repo" && pwd)"; factory_load_run_env; cat "$(factory_state)/run.env"; fi
+  ;;
+remove)
+  for role in "${FACTORY_ROLES[@]}"; do
+    if seat_exists "$role"; then jam rm --as "$owner/$role" >/dev/null && note "removed $owner/$role"; fi
+  done
+  if [[ -n "$repo" ]]; then
+    FACTORY_REPO="$(cd "$repo" && pwd)"; factory_load_run_env
+    [[ -n "${ROOM_ID:-}" ]] && jam room rename "$ROOM_ID" "old-$(date +%m%d-%H%M)" >/dev/null && note "room $ROOM_ID renamed old-*"
+  fi
+  ;;
+*) die "usage: factory-seats create|status|remove [--repo <result-dir>]" ;;
+esac

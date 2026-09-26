@@ -1,0 +1,43 @@
+#!/usr/bin/env bash
+# Create a fresh result repository that carries the factory with it.
+#
+#   factory-init <result-dir>
+#
+# Copies mandates/, factory/, docker/, FACTORY.md and a README into <result-dir>, installs the
+# seats' project settings (.claude/settings.json: the guard hook) and the factory git hooks,
+# and makes one commit as the repository owner (the git identity configured on this machine).
+# Everything the seats build after that is theirs.
+set -euo pipefail
+source "$(dirname "$0")/_lib.sh"
+
+dest="${1:-}"
+[[ -n "$dest" ]] || die "usage: factory-init <result-dir>"
+src="$(dirname "$FACTORY_DIR")"
+[[ -d "$src/mandates" ]] || die "no mandates/ next to factory/ in $src"
+if [[ -e "$dest" ]] && [[ -n "$(ls -A "$dest" 2>/dev/null)" ]]; then die "$dest exists and is not empty"; fi
+
+mkdir -p "$dest"
+dest="$(cd "$dest" && pwd)"
+git -C "$dest" init -q -b main
+
+cp -r "$src/mandates" "$src/factory" "$src/docker" "$dest/"
+cp "$src/FACTORY.md" "$dest/FACTORY.md"
+cp "$FACTORY_DIR/templates/result-README.md" "$dest/README.md"
+mkdir -p "$dest/.claude"
+cp "$FACTORY_DIR/settings/seat.json" "$dest/.claude/settings.json"
+cat > "$dest/.gitignore" <<'EOF'
+.env
+.env.*
+*.key
+*.pem
+node_modules/
+.venv/
+__pycache__/
+.DS_Store
+.claude/settings.local.json
+EOF
+git -C "$dest" config core.hooksPath factory/git-hooks
+git -C "$dest" add -A
+git -C "$dest" commit -q -m "Set up the factory: mandates, tooling, seat settings"
+note "result repository: $dest ($(git -C "$dest" rev-parse --short HEAD))"
+note "next: factory/bin/factory-seats create --repo $dest"

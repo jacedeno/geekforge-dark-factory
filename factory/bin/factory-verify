@@ -1,0 +1,104 @@
+#!/usr/bin/env bash
+# Verifier: check one delivered commit independently and write an evidence report.
+#
+#   factory-verify <commit> [--check "<command>"]
+#
+# Against a fresh clone of the repository, checked out at <commit> (never a seat's working tree,
+# and a clone proves every file is really committed):
+#   1. scope : since STAGE_BASE, nothing changed outside the increment directory and the
+#              planning/review directories, and no earlier increment directory changed
+#   2. check : CHECK_CMD from run.env (or --check), with {repo} {dir} {n} {out} filled in
+# The report lands in <repo>/reviews/<increment>/; the verifier commits it. Exit 0 only if all pass.
+set -euo pipefail
+source "$(dirname "$0")/_lib.sh"
+
+commit="" check_override=""
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --check) check_override="$2"; shift 2 ;;
+    -h|--help) sed -n '2,11p' "$0"; exit 0 ;;
+    *) commit="$1"; shift ;;
+  esac
+done
+[[ -n "$commit" ]] || die "usage: factory-verify <commit> [--check <command>]"
+factory_load_run_env
+[[ -n "${STAGE_DIR:-}" ]] || die "no current increment; the planner runs factory-stage first"
+[[ -n "$check_override" ]] && CHECK_CMD="$check_override"
+repo="$(factory_repo)"; state="$(factory_state)"
+
+sha="$(git -C "$repo" rev-parse --verify "$commit^{commit}")" || die "unknown commit: $commit"
+short="${sha:0:12}"
+stamp="$(date -u +%Y%m%dT%H%M%SZ)"
+reports="$repo/$REVIEW_DIR/$STAGE_DIR"
+mkdir -p "$reports"
+report="$reports/$stamp-$short.md"
+clone="$(mktemp -d "${TMPDIR:-/tmp}/factory-verify-$short-XXXX")"
+out="$state/checks/$STAGE_DIR-$stamp-$short"
+trap 'rm -rf "$clone"' EXIT
+
+declare -A result
+section() { printf '\n## %s\n\n' "$1" >> "$report"; }
+fence() { { echo '```'; cat; echo '```'; } >> "$report"; }
+
+{
+  echo "# Verification report: $STAGE_DIR @ $short"
+  echo
+  echo "| Field | Value |"
+  echo "|---|---|"
+  echo "| Commit | \`$sha\` |"
+  echo "| Increment directory | \`$STAGE_DIR\` |"
+  echo "| Increment base | \`${STAGE_BASE:-none}\` |"
+  echo "| Checked at | $stamp |"
+  echo "| Checkout | fresh clone at the commit, removed after the run |"
+} > "$report"
+
+git clone -q --no-local "$repo" "$clone"
+git -C "$clone" checkout -q --detach "$sha"
+
+# 1. scope
+section "1. Scope"
+if [[ -n "${STAGE_BASE:-}" ]] && git -C "$clone" merge-base --is-ancestor "$STAGE_BASE" "$sha" 2>/dev/null; then
+  outside="$(git -C "$clone" diff --name-only "$STAGE_BASE" "$sha" \
+             | grep -v -E "^(${STAGE_DIR}|${PLAN_DIR}|${REVIEW_DIR})(/|$)" || true)"
+  if [[ -z "$outside" ]]; then
+    result[scope]=PASS; echo "Every change since \`${STAGE_BASE:0:12}\` is inside \`$STAGE_DIR/\`, \`$PLAN_DIR/\` or \`$REVIEW_DIR/\`." >> "$report"
+  else
+    result[scope]=FAIL; echo "Changes outside the increment:" >> "$report"; fence <<< "$outside"
+  fi
+else
+  result[scope]=FAIL; echo "The commit does not descend from the increment base \`${STAGE_BASE:-none}\`." >> "$report"
+fi
+if [[ ! -f "$clone/$STAGE_DIR/Dockerfile" ]]; then
+  echo "Note: \`$STAGE_DIR/Dockerfile\` is not in the commit." >> "$report"
+fi
+
+# 2. check
+section "2. Check"
+if [[ -z "${CHECK_CMD:-}" ]]; then
+  result[check]=FAIL; echo "No check command set for this increment." >> "$report"
+else
+  cmd="${CHECK_CMD//\{repo\}/$clone}"; cmd="${cmd//\{dir\}/$STAGE_DIR}"
+  cmd="${cmd//\{n\}/${STAGE_N:-}}"; cmd="${cmd//\{out\}/$out}"
+  log="$(mktemp)"
+  set +e; (cd "$clone" && bash -c "$cmd") >"$log" 2>&1; rc=$?; set -e
+  echo "Command: \`$CHECK_CMD\` (exit $rc); full output in \`$out\`" >> "$report"
+  tail -n 60 "$log" | fence
+  rm -f "$log"
+  if [[ $rc -eq 0 ]]; then result[check]=PASS; else result[check]=FAIL; fi
+fi
+
+section "Summary"
+overall=PASS
+{
+  echo "| Check | Result |"
+  echo "|---|---|"
+  for k in scope check; do
+    echo "| $k | ${result[$k]} |"
+    [[ "${result[$k]}" == FAIL ]] && overall=FAIL
+  done
+} >> "$report"
+printf '\n**Overall: %s**\n\nThe check command covers only what it covers: requirements it does not exercise are verified by the probes listed in the verdict, or not at all.\n' "$overall" >> "$report"
+
+printf 'report: %s\n' "${report#"$repo"/}"
+printf 'scope=%s check=%s overall=%s\n' "${result[scope]}" "${result[check]}" "$overall"
+[[ "$overall" == PASS ]]

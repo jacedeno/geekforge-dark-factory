@@ -1,0 +1,61 @@
+#!/usr/bin/env bash
+# Create one git worktree per seat and write the shared run config.
+#
+#   factory-setup --stage <dir> --accept "<cmd>" [--next-accept "<cmd>"]
+#                 [--port N] [--health <path>] [--base <ref>] [--scope-base <ref>]
+#
+# Re-running it for a later increment only rewrites run.env; existing worktrees are kept.
+# --scope-base sets the commit the scope check diffs against (default: main). Use it when the
+# accepted previous increment is not merged into main, e.g. in a rehearsal.
+# Acceptance commands see BASE_URL (the running service) and STAGE_PATH (the checked-out
+# increment directory) in their environment.
+set -euo pipefail
+source "$(dirname "$0")/_lib.sh"
+
+stage="" accept="" next_accept="" port=8080 health="/" base="HEAD" scope_base=""
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --stage) stage="$2"; shift 2 ;;
+    --accept) accept="$2"; shift 2 ;;
+    --next-accept) next_accept="$2"; shift 2 ;;
+    --port) port="$2"; shift 2 ;;
+    --health) health="$2"; shift 2 ;;
+    --base) base="$2"; shift 2 ;;
+    --scope-base) scope_base="$2"; shift 2 ;;
+    -h|--help) sed -n '2,10p' "$0"; exit 0 ;;
+    *) die "unknown argument: $1" ;;
+  esac
+done
+[[ -n "$stage" ]] || die "--stage is required"
+[[ "$stage" != /* && "$stage" != *..* ]] || die "--stage must be a relative path inside the repo"
+
+main="$(factory_main_repo)"
+seats="$(factory_seats_dir)"
+mkdir -p "$seats"
+
+for role in "${FACTORY_ROLES[@]}"; do
+  wt="$seats/$role"
+  if [[ -d "$wt" ]]; then
+    note "kept   $wt"
+  else
+    git -C "$main" worktree add -q -B "seat/$role" "$wt" "$base"
+    note "added  $wt (branch seat/$role)"
+  fi
+done
+
+# Every checkout (main and seats) uses the factory's git hooks.
+git -C "$main" config core.hooksPath factory/git-hooks
+
+{
+  printf '# Written by factory-setup on %s. Shared by every seat.\n' "$(date -u +%FT%TZ)"
+  printf 'STAGE_DIR=%q\n' "$stage"
+  printf 'ACCEPT_CMD=%q\n' "$accept"
+  printf 'NEXT_ACCEPT_CMD=%q\n' "$next_accept"
+  printf 'SERVICE_PORT=%q\n' "$port"
+  printf 'HEALTH_PATH=%q\n' "$health"
+  printf 'FACTORY_MAIN_REPO=%q\n' "$main"
+  if [[ -n "$scope_base" ]]; then printf 'FACTORY_BASE_REF=%q\n' "$(git -C "$main" rev-parse --verify "$scope_base^{commit}")"; fi
+} > "$seats/run.env"
+
+note "run config: $seats/run.env"
+note "next: start each seat with factory/bin/factory-seat <role>"

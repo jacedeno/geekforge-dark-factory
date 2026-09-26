@@ -1,0 +1,62 @@
+#!/usr/bin/env python3
+"""Check that mandates stay generic: nothing a specific problem would name.
+
+    factory-lint-mandates [--terms FILE ...] [MANDATE ...]
+
+Built-in checks flag anything shaped like problem detail: URL paths, data-testid values,
+UPPER_SNAKE error codes, HTTP status numbers, quoted field names. Each --terms file adds
+problem-specific words (one per line, '#' comments), e.g. the nouns of the spec being built;
+keep those files next to the task, never next to the mandates. Exit 1 on any finding.
+"""
+import argparse
+import pathlib
+import re
+import sys
+
+ROOT = pathlib.Path(__file__).resolve().parents[2]
+
+SHAPES = [
+    (re.compile(r"(?<![\w.])/(?:api|v\d+)?/?[a-z][\w-]*/[\w{}:-]+"), "URL-path-shaped text"),
+    (re.compile(r"data-testid", re.I), "data-testid"),
+    (re.compile(r"\b[A-Z][A-Z0-9]*_[A-Z0-9_]{2,}\b"), "UPPER_SNAKE code"),
+    (re.compile(r"\b[1-5]\d\d\b(?!\s*(ms|s|seconds|lines|words))"), "HTTP-status-shaped number"),
+    (re.compile(r"\"[a-z]+(_[a-z]+)+\"|`[a-z]+(_[a-z]+)+`"), "snake_case field name"),
+]
+# Allowed factory vocabulary that the shapes above would otherwise catch.
+ALLOW = re.compile(r"factory/bin/[\w-]+|\.factory/\w+|ACCEPT_CMD|NEXT_ACCEPT_CMD|STAGE_DIR")
+
+
+def main() -> int:
+    ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    ap.add_argument("--terms", action="append", default=[])
+    ap.add_argument("files", nargs="*")
+    args = ap.parse_args()
+    files = [pathlib.Path(f) for f in args.files] or sorted((ROOT / "mandates").glob("*.md"))
+
+    terms = []
+    for tf in args.terms:
+        for line in pathlib.Path(tf).read_text().splitlines():
+            line = line.split("#", 1)[0].strip()
+            if line:
+                terms.append(re.compile(rf"\b{re.escape(line)}", re.I))
+
+    findings = 0
+    for path in files:
+        for no, line in enumerate(path.read_text().splitlines(), 1):
+            scrubbed = ALLOW.sub("", line)
+            hits = [label for rx, label in SHAPES if rx.search(scrubbed)]
+            hits += [f"term '{t.pattern[2:].replace(chr(92), '')}'" for t in terms if t.search(scrubbed)]
+            for label in hits:
+                findings += 1
+                shown = path.resolve().relative_to(ROOT) if path.resolve().is_relative_to(ROOT) else path
+                print(f"{shown}:{no}: {label}: {line.strip()}")
+    count = len(files)
+    if findings:
+        print(f"FAIL: {findings} finding(s) in {count} mandate(s)")
+        return 1
+    print(f"PASS: {count} mandate(s) generic")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
