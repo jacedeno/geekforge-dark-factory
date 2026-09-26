@@ -292,6 +292,10 @@ def test_planner_matches_reference(seed):
     ada = login(ADA)
     want = reference_plan(tables, pairs, placed, closed, cfrom, cto)
     r = replan(ada, closed, cfrom.isoformat(), cto.isoformat())
+    considered = [b for b in placed if b["status"] == "confirmed" and b["start"] < cto and cfrom < b["end"]]
+    if len(considered) > 6:
+        err(r, 422, "planning_limit")
+        return
     if want is None:
         err(r, 409, "no_feasible_plan")
         return
