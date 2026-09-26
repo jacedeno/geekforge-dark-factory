@@ -1,0 +1,17 @@
+== build stage-2 and stage-1 @ 48a39df74bc1
+sha256:17e70accfbe37330d30868fbd50bcea0c56ec8ee5b395c761014b41ce9c0de76
+sha256:d304b5094863d5417601f2fc1787fe95381fb762fa6d6c309b96e26f8bd1291a
+== A (stage-2, PORT=9123) healthy after 0.9 s
+== B (stage-2, default 8080) healthy
+== P (stage-1) healthy
+== stage-1 probes against stage-2 (regression)
+........................................................................ [ 57%]
+......................................................                   [100%]
+126 passed, 1 deselected in 106.91s (0:01:46)
+== stage-2 API probes
+.......................................                                  [100%]
+39 passed in 7.33s
+== stage-2 browser probes
+.........................                                                [100%]
+25 passed in 33.12s
+== container A: 0 restarts oom=false running=true

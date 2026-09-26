@@ -25,6 +25,7 @@ Increment verdict for stage-2: ACCEPT at 48a39df74bc1db80bfbea277b11ef6d473bf8af
   confirmed / refused / uncertain states; human labels for pairs ("Window + Garden, Joined 6 seats");
   labelled inputs; consistent header with navigation and current user; usable single-column
   layout at 375 px.
+- Second run: factory-verify again PASS (`20260926T224415Z-48a39df74bc1.md`); run.sh again -> 126 + 39 + 25 passed, 0 failed (`probes-48a39df74bc1-run2.log`). Not flaky.
 - Ledger: 46/46 stage-2 requirements covered, 41 by own probes (`ledger.md`); stage-1 ledger rerun.
 
 ## Code read
