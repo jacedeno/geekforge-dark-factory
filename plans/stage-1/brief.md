@@ -83,7 +83,8 @@ D13. Auth: emails compared case-insensitively (stored as given, matched lowercas
 D14. Reset fixture: missing top-level arrays default to `[]`. A fixture that is not an object or
     has invalid data (e.g. an id longer than 64 characters, unknown weekday) -> 422
     `validation_failed` with state unchanged; unparseable JSON -> 400. Seeded reservations are
-    trusted (no grid/hours validation), status `confirmed`, `created_at` taken from the fixture if
+    trusted (no grid/hours validation; a seeded `reference` may be any non-empty string of at
+    most 64 characters, only generated references follow the §8 6..12 A-Z0-9 format), status `confirmed`, `created_at` taken from the fixture if
     present else the reset time.
 D15. Unknown routes -> 404 `not_found`; wrong method on a known route -> 405 with the error body
     (code `method_not_allowed`). Every 4xx/5xx carries the §5 error body.
