@@ -19,7 +19,7 @@ Increment verdict for stage-4: ACCEPT at c150b0fe77082886ba32865d84f7de0a1b4f9c2
   own anchor already held the table; 409 was correct); fixed in the probe, rerun clean. Healthy 1.7 s.
 - WO 4.1: tree of `stage-4/` at 97ab750 equals tree of `stage-3/` at 1937f01 (49682eb).
   `stage-1/`..`stage-3/` unchanged.
-- Ledger: 26/26 stage-4 requirements covered, 23 by own probes; stages 1-3 rerun as regression.
+- Ledger: 26/26 stage-4 requirements covered, 22 by own probes; stages 1-3 rerun as regression.
   Requirement 25 (series-amend `cutoff_passed`) needs wall-clock time to pass after adoption and is
   verified by code read only: `_amend_series` checks the accepted cutoff for each really changing
   occurrence, in index order, before validation, as G9 states.
