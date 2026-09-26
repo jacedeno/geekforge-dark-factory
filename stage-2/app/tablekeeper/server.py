@@ -7,14 +7,20 @@ import traceback
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qsl, unquote, urlsplit
 
+from . import web
 from .errors import ApiError, malformed
 from .service import Request, Service
 
 JSON_TYPE = "application/json; charset=utf-8"
 MAX_BODY = 32 * 1024 * 1024
 
-# (path pattern, {method: service attribute}); None in a pattern matches one non-empty segment.
+# (path pattern, {method: service attribute or function}); None matches one non-empty segment.
 ROUTES = [
+    (("",), {"GET": web.page}),
+    (("signup",), {"GET": web.page}),
+    (("login",), {"GET": web.page}),
+    (("lookup",), {"GET": web.page}),
+    (("assets", None), {"GET": web.asset}),
     (("health",), {"GET": "health"}),
     (("_test", "reset"), {"POST": "reset"}),
     (("_test", "export"), {"GET": "export"}),
@@ -59,10 +65,15 @@ def make_handler(service):
             pass
 
         def _send(self, status, body):
-            data = b"" if body is None else json.dumps(body, ensure_ascii=False).encode("utf-8")
+            if isinstance(body, web.Raw):
+                content_type, data = body.content_type, body.data
+            else:
+                content_type = JSON_TYPE
+                data = b"" if body is None else json.dumps(body, ensure_ascii=False).encode("utf-8")
             self.send_response(status)
             if body is not None:
-                self.send_header("Content-Type", JSON_TYPE)
+                self.send_header("Content-Type", content_type)
+                self.send_header("Cache-Control", "no-cache")
             self.send_header("Content-Length", str(len(data)))
             self.end_headers()
             if data and self.command != "HEAD":
@@ -122,7 +133,8 @@ def make_handler(service):
                 for k, v in parse_qsl(url.query, keep_blank_values=True):
                     query.setdefault(k, v)
                 req = Request(self.command, url.path, params, query, self.headers, body)
-                status, payload = getattr(service, name)(req)
+                handler = name if callable(name) else getattr(service, name)
+                status, payload = handler(req)
             except ApiError as e:
                 status, payload = e.status, e.body()
             except Exception:
