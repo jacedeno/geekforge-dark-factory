@@ -1,0 +1,49 @@
+== build verifier-probe:84a7bbbd137f
+sha256:aeaaa9f1ee83140000dcdeca05908fa4c95fff3ff15caa884db86cc68493eaf1
+== A (PORT=9123) healthy after 0.6 s
+== B (no PORT, default 8080) healthy
+== probes
+........................................................................ [ 56%]
+.....................................................FF                  [100%]
+=================================== FAILURES ===================================
+_____________________ test_unusual_http_method_is_not_5xx ______________________
+
+world = (<test_probes.C object at 0x7f47e66a39b0>, <test_probes.C object at 0x7f47e6691970>)
+
+    def test_unusual_http_method_is_not_5xx(world):
+        """D15 / §5: a wrong method on a known route is 405; no request produces a 5xx."""
+        for m in ("TRACE", "FOO", "CONNECT"):
+            r = httpx.request(m, f"{BASE}/restaurants")
+>           assert r.status_code < 500, (m, r.status_code, r.text)
+E           AssertionError: ('TRACE', 501, '{"error": {"code": "internal_error", "message": "Unsupported method (\'TRACE\')"}}')
+E           assert 501 < 500
+E            +  where 501 = <Response [501 Not Implemented]>.status_code
+
+reviews/stage-1/probes/test_probes.py:1055: AssertionError
+______________ test_export_of_any_accepted_fixture_is_importable _______________
+
+    def test_export_of_any_accepted_fixture_is_importable():
+        """§10: import must accept an unchanged export. Fixtures reset accepts (empty display_name,
+        empty restaurant name) must survive the round trip."""
+        users = [{"id": "u_e", "email": "e@x.io", "password": "correct horse", "display_name": ""}]
+        reset(fixture(users=users, restaurants=[restaurant(name="")]))
+        snap = ok(httpx.get(f"{BASE}/_test/export"), 200)
+>       ok(imp(snap), 204)
+
+reviews/stage-1/probes/test_probes.py:1065: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+r = <Response [422 Unprocessable Content]>, status = 204
+
+    def ok(r, status):
+>       assert r.status_code == status, f"expected {status}, got {r.status_code}: {r.text[:400]}"
+E       AssertionError: expected 204, got 422: {"error": {"code": "validation_failed", "message": "display_name must be a string"}}
+E       assert 422 == 204
+E        +  where 422 = <Response [422 Unprocessable Content]>.status_code
+
+reviews/stage-1/probes/test_probes.py:92: AssertionError
+=========================== short test summary info ============================
+FAILED reviews/stage-1/probes/test_probes.py::test_unusual_http_method_is_not_5xx
+FAILED reviews/stage-1/probes/test_probes.py::test_export_of_any_accepted_fixture_is_importable
+== container A restarts: 0 oom=false running=true
+exit 1

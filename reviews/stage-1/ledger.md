@@ -20,7 +20,7 @@ Coverage: `S:<file>::<test>` = shipped check (harness `tablekeeper/test/stage_1/
 | 11 | Content-Type `application/json; charset=utf-8` on JSON responses | §3.4 | P: test_content_type_on_success_and_error |
 | 12 | Unknown body fields and query params ignored | §3.4 | S: test_unknown_body_fields_are_ignored, test_unknown_query_parameters_are_ignored |
 | 13 | Every 4xx has `{"error":{"code","message"}}` | §5 | P: every probe error goes through `err()` which checks envelope |
-| 14 | Unknown route 404 `not_found`; wrong method 405 `method_not_allowed` | D15 | P: test_unknown_route_404, test_wrong_method_405 |
+| 14 | Unknown route 404 `not_found`; wrong method 405 `method_not_allowed` (any method, incl. TRACE/unknown) | D15, §5 | P: test_unknown_route_404, test_wrong_method_405, test_unusual_http_method_is_not_5xx |
 | 15 | No 5xx under odd input (bad JSON, arrays, nulls, huge values, unicode) | §5 | P: test_garbage_inputs_never_5xx |
 | 16 | `GET /restaurants` shape `{id,name,timezone}` | §8 | S: test_restaurant_list_shape |
 | 17 | `GET /restaurants/{id}` fixture shape incl. tables, opening_hours; 404 unknown; public | §8 | S: test_restaurant_detail_carries_the_fixture_shape, 404, public |
@@ -71,6 +71,7 @@ Coverage: `S:<file>::<test>` = shipped check (harness `tablekeeper/test/stage_1/
 | 62 | After import: login with password, old tokens, references, statuses, timestamps, ids identical | §10 | P: test_export_import_roundtrip_full |
 | 63 | After import: replays 200 original; failed keys reusable; different body 409 | §10 | P: test_export_import_roundtrip_full |
 | 64 | Import into a fresh container works (no dependency on source process) | §10 | P: test_import_into_fresh_container (second container) |
+| 64b | Import accepts the unchanged export of any state reset accepted | §10 | P: test_export_of_any_accepted_fixture_is_importable |
 | 65 | Invalid import (wrong track/version, missing state, non-object state, bad state) -> 422 unchanged; bad JSON 400 | §10, D17 | P: test_invalid_imports |
 | 66 | Import removes previous destination data and tokens; reset clears imported state | §10 | P: test_import_replaces_and_reset_clears |
 | 67 | Export is a snapshot: later writes do not change it | §10 | P: test_export_is_snapshot |

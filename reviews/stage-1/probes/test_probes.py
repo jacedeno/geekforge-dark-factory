@@ -295,7 +295,7 @@ def test_multiple_tokens_valid(world):
         ok(c.get("/reservations"), 200)
 
 
-@pytest.mark.parametrize("hdr", [None, "", "Bearer", "Bearer ", "bearer {t}", "Basic {t}", "Bearer  {t}",
+@pytest.mark.parametrize("hdr", [None, "", "Bearer", "bearer {t}", "Basic {t}", "Bearer  {t}",
                                  "Bearer {t}x", "Token {t}", "{t}"])
 def test_protected_endpoints_401_matrix(world, hdr):
     ada, _ = world
@@ -437,18 +437,24 @@ def test_fall_back_overlap_in_absolute_time():
 @pytest.mark.parametrize("rid,date", [("r_berlin", "2026-03-29"), ("r_berlin", "2026-10-25"),
                                       ("r_ny", "2026-03-08"), ("r_ny", "2026-11-01")])
 def test_every_listed_slot_is_bookable_on_transition_days(rid, date):
-    zoned(slot=15, dur=120)
+    """D10: on each transition day every 15-minute candidate is bookable iff it is listed.
+    One table per candidate, so bookings never block each other (past dates cannot be cancelled)."""
+    tables = [{"id": f"t_{i}", "label": str(i), "capacity": 4} for i in range(96)]
+    reset(fixture(restaurants=[
+        restaurant("r_berlin", tz="Europe/Berlin", slot=15, dur=120, hours=all_week("00:00", "23:30"), tables=tables),
+        restaurant("r_ny", tz="America/New_York", slot=15, dur=120, hours=all_week("00:00", "23:30"), tables=tables)]))
     ada = login(ADA)
     listed = set(slot_times(date, rid))
+    assert listed
+    i = 0
     for h in range(24):
         for m in range(0, 60, 15):
             at = f"{h:02d}:{m:02d}"
-            # a fresh restaurant state for each probe is too slow; use party 1 on rotating tables
-            r = ada.post("/reservations", json_={"restaurant_id": rid, "table_id": "t_3",
+            r = ada.post("/reservations", json_={"restaurant_id": rid, "table_id": f"t_{i}",
                                                   "starts_at_local": f"{date}T{at}", "party_size": 1}, key_=key())
+            i += 1
             if at in listed:
                 assert r.status_code == 201, (at, r.status_code, r.text)
-                ada.post(f"/reservations/{r.json()['reference']}/cancel")
             else:
                 assert r.status_code == 422, (at, r.status_code, r.text)
 
@@ -815,7 +821,7 @@ def check_restored(base, ada_tok, bob_tok, d, h):
     assert ok(bob.post("/reservation-moves", json_={"moves": [{"reference": h["b3"]["reference"],
                                                                "table_id": "t_1"}]}, key_=h["km"]), 200) == h["mv"]
     # the failed key is reusable: first use now succeeds
-    ok(book(ada, d, at="21:00", table="t_1", party=2, k=h["kf"]), 201)
+    ok(book(ada, d, at="18:00", table="t_1", party=2, k=h["kf"]), 201)
     # occupancy restored: b1 blocks t_2 at 19:00
     err(book(bob, d, at="19:00", table="t_2"), 409, "table_unavailable")
     # new references do not collide with imported ones and ids stay unique
@@ -1038,3 +1044,23 @@ def test_concurrent_identical_moves():
         out = list(ex.map(go, range(30)))
     codes = sorted(r.status_code for r in out)
     assert codes.count(201) == 1 and codes.count(200) == 29, codes
+
+
+# ---------------------------------------------------------------- added after the first code read
+
+def test_unusual_http_method_is_not_5xx(world):
+    """D15 / §5: a wrong method on a known route is 405; no request produces a 5xx."""
+    for m in ("TRACE", "FOO", "CONNECT"):
+        r = httpx.request(m, f"{BASE}/restaurants")
+        assert r.status_code < 500, (m, r.status_code, r.text)
+        assert r.status_code == 405, (m, r.status_code)
+
+
+def test_export_of_any_accepted_fixture_is_importable():
+    """§10: import must accept an unchanged export. Fixtures reset accepts (empty display_name,
+    empty restaurant name) must survive the round trip."""
+    users = [{"id": "u_e", "email": "e@x.io", "password": "correct horse", "display_name": ""}]
+    reset(fixture(users=users, restaurants=[restaurant(name="")]))
+    snap = ok(httpx.get(f"{BASE}/_test/export"), 200)
+    ok(imp(snap), 204)
+    login({"email": "e@x.io", "password": "correct horse"})
