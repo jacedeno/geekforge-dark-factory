@@ -55,7 +55,7 @@ export PROBE_BASE_URL="http://127.0.0.1:$pa" PROBE_BASE_URL_FRESH="http://127.0.
 rc=0
 echo "== stage-1 probes against stage-2 (regression)"
 "${clean_env[@]}" "$py" -m pytest -q -p no:cacheprovider "$repo/reviews/stage-1/probes/test_probes.py" \
-  --deselect "$repo/reviews/stage-1/probes/test_probes.py::test_create_shape_strict" "$@" || rc=1
+  -k "not test_create_shape_strict" "$@" || rc=1
 echo "== stage-2 API probes"
 "${clean_env[@]}" "$py" -m pytest -q -p no:cacheprovider "$here/test_api2.py" "$@" || rc=1
 echo "== stage-2 browser probes"

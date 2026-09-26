@@ -1,0 +1,39 @@
+== build stage-2 and stage-1 @ 48a39df74bc1
+sha256:6b33ecf312879cb196b339a9cb67d28a9dbe102bbcfc3bfe153d1fc256711a40
+sha256:e6e9cb883acc42435a03d02fbfb690e393c5d75ac59eab53903f0fcf067bc891
+== A (stage-2, PORT=9123) healthy after 0.9 s
+== B (stage-2, default 8080) healthy
+== P (stage-1) healthy
+== stage-1 probes against stage-2 (regression)
+..................................................F..................... [ 56%]
+.......................................................                  [100%]
+=================================== FAILURES ===================================
+___________________________ test_create_shape_strict ___________________________
+
+world = (<test_probes.C object at 0x7f0f10b0ee70>, <test_probes.C object at 0x7f0f10b0dc70>)
+
+    def test_create_shape_strict(world):
+        ada, _ = world
+        d = day()
+        r = ok(book(ada, d), 201)
+>       assert set(r) == {"reservation_id", "reference", "restaurant_id", "table_id", "party_size", "status",
+                          "starts_at_local", "starts_at", "ends_at", "created_at"}, set(r)
+E       AssertionError: {'created_at', 'ends_at', 'party_size', 'reference', 'reservation_id', 'restaurant_id', ...}
+E       assert {'created_at'...rant_id', ...} == {'created_at'...rant_id', ...}
+E         
+E         Extra items in the left set:
+E         'table_ids'
+E         Use -v to get more diff
+
+reviews/stage-1/probes/test_probes.py:468: AssertionError
+=========================== short test summary info ============================
+FAILED reviews/stage-1/probes/test_probes.py::test_create_shape_strict - Asse...
+1 failed, 126 passed in 107.63s (0:01:47)
+== stage-2 API probes
+.......................................                                  [100%]
+39 passed in 7.31s
+== stage-2 browser probes
+.........................                                                [100%]
+25 passed in 33.35s
+== container A: 0 restarts oom=false running=true
+exit 1
