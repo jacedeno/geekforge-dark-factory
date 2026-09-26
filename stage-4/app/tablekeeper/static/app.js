@@ -704,6 +704,19 @@
       h("p", { class: "confirmation-note" }, "Keep this reference to look up or cancel your booking."));
   }
 
+  // A replayed confirmation is the original response; the booking's tables may have changed
+  // since (for example after a seating change), so show the reservation as it is now.
+  async function showCurrentTables(sel, outcome) {
+    const ref = outcome.reservation.reference;
+    const current = await api("GET", `/reservations/${encodeURIComponent(ref)}`, { auth: true });
+    if (search.selection !== sel || search.outcome !== outcome) return;
+    if (current.kind === "response" && current.status === 200 && current.data &&
+        current.data.reference === ref) {
+      outcome.reservation = current.data;
+      renderOutcome();
+    }
+  }
+
   function bookingBody(sel, party) {
     const body = { restaurant_id: sel.restaurant.id };
     if (sel.tableIds.length === 1) body.table_id = sel.tableIds[0];
@@ -741,9 +754,11 @@
     const ok = result.kind === "response" && (result.status === 200 || result.status === 201) &&
       result.data && typeof result.data.reference === "string";
     if (ok) {
-      search.outcome = { kind: "success", reservation: result.data };
+      const outcome = { kind: "success", reservation: result.data };
+      search.outcome = outcome;
       renderOutcome();
       refreshSearch();
+      showCurrentTables(sel, outcome);
     } else if (result.kind === "network" || (result.status >= 500) ||
         (result.status >= 200 && result.status < 300)) {
       search.outcome = { kind: "uncertain", message: "We couldn't confirm whether this booking " +

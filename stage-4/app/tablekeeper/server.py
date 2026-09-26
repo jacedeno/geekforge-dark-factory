@@ -39,6 +39,9 @@ ROUTES = [
     (("restaurants", None, "policies"), {"GET": "list_policies", "POST": "publish_policy"}),
     (("series",), {"POST": "create_series"}),
     (("series", None), {"GET": "get_series"}),
+    (("series", None, "amend"), {"POST": "amend_series"}),
+    (("restaurants", None, "replans"), {"POST": "replan"}),
+    (("restaurants", None, "replans", None, "apply"), {"POST": "apply_plan"}),
 ]
 
 

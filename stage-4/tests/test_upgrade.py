@@ -79,7 +79,7 @@ class UpgradeTest(Stage3Test):
         second = series["occurrences"][1]["reference"]
         self.client.patch(f"/reservations/{second}", {"party_size": 2}, token=self.ada)
         before = self.client.get("/_test/export")[1]
-        self.assertEqual(before["state"]["schema"], 3)
+        self.assertEqual(before["state"]["schema"], 4)
         history = self.client.get(f"/reservations/{ref}/history", token=self.ada)[1]
         current = self.client.get(f"/series/{series['series_id']}", token=self.ada)[1]
 

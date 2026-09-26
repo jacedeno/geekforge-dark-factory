@@ -10,12 +10,15 @@ from . import clock
 from .errors import invalid
 from .passwords import hash_password, parse_hash
 
-STATE_SCHEMA = 3
+STATE_SCHEMA = 4
 STAGE_1_SCHEMA = 1  # exports of the stage-1 service: single tables, no combinable pairs
 STAGE_2_SCHEMA = 2  # exports of the stage-2 service: no policies, revisions or history
+STAGE_3_SCHEMA = 3  # exports of the stage-3 service: no closures, plans or series anchor dates
 STATUSES = ("confirmed", "cancelled")
-EVENTS = ("created", "changed", "cancelled")
+EVENTS = ("created", "changed", "cancelled", "reassigned")
 REFERENCE_RE = re.compile(r"[A-Z0-9]{6,12}")
+INSTANT_RE = re.compile(r"[0-9]{4}-[0-9]{2}-[0-9]{2}[Tt][0-9]{2}:[0-9]{2}:[0-9]{2}(\.[0-9]+)?"
+                        r"([Zz]|[+-][0-9]{2}:[0-9]{2})")
 
 
 @dataclass(frozen=True)
@@ -81,11 +84,17 @@ class Restaurant:
     combinable: list  # declared pairs, fixture order, each as given
     managers: list = field(default_factory=list)
     policies: list = field(default_factory=list)  # published Policy objects, publication order
-    revision: int = 0  # internal restaurant revision (F5), not exposed in stage 3
+    revision: int = 0  # restaurant revision (G1)
+    closures: list = field(default_factory=list)  # applied Closure objects
 
     @property
     def table_ids(self):
         return [t["id"] for t in self.tables]
+
+    def closed(self, table_ids, start, end):
+        """True when an applied closure of any of these tables overlaps [start, end)."""
+        return any(c.table_id in table_ids and c.start < end and start < c.end
+                   for c in self.closures)
 
     def terms_for(self, day):
         """The policy for a local date: greatest effective_from <= day, ties by version (F2)."""
@@ -148,11 +157,15 @@ class HistoryEntry:
     changes: list
     revision: int
     terms: Terms
+    plan_id: str = None  # set on `reassigned` entries
 
     def view(self, zone):
-        return {"seq": self.seq, "at": clock.render(self.at, zone), "event": self.event,
+        view = {"seq": self.seq, "at": clock.render(self.at, zone), "event": self.event,
                 "changes": [dict(c) for c in self.changes], "revision": self.revision,
                 "accepted_terms": self.terms.snapshot()}
+        if self.plan_id is not None:
+            view["plan_id"] = self.plan_id
+        return view
 
 
 @dataclass
@@ -195,12 +208,12 @@ class Reservation:
             view["table_id"] = self.table_ids[0]
         return view
 
-    def record(self, event, changes, at):
+    def record(self, event, changes, at, plan_id=None):
         """Append a history entry; `at` never goes back in time (history rule 1)."""
         if self.history and at < self.history[-1].at:
             at = self.history[-1].at
         self.history.append(HistoryEntry(len(self.history) + 1, at, event, changes,
-                                         self.revision, self.terms))
+                                         self.revision, self.terms, plan_id))
 
 
 def table_changes(old, new):
@@ -235,6 +248,33 @@ class Series:
     occurrences: list  # reservation ids in index order
     revision: int = 1
     exceptions: set = field(default_factory=set)  # reservation ids marked as diner exceptions
+    anchor_date: date = None  # the anchor's local date at adoption; schedules derive from it
+
+    def scheduled_date(self, index):
+        return self.anchor_date + timedelta(days=7 * self.interval_weeks * index)
+
+
+@dataclass
+class Closure:
+    table_id: str
+    from_text: str  # as supplied
+    to_text: str
+    start: datetime  # UTC
+    end: datetime
+    plan_id: str
+
+    def view(self):
+        return {"table_id": self.table_id, "from": self.from_text, "to": self.to_text}
+
+
+@dataclass
+class Plan:
+    id: str
+    restaurant_id: str
+    revision: int  # restaurant revision the plan was computed at
+    closure: Closure
+    assignments: list  # (reservation id, table ids, changed) in reference order
+    applied: bool = False
 
 
 @dataclass
@@ -257,6 +297,7 @@ class State:
     reservations: dict = field(default_factory=dict)  # id -> Reservation, insertion ordered
     references: dict = field(default_factory=dict)  # reference -> reservation id
     series: dict = field(default_factory=dict)  # id -> Series
+    plans: dict = field(default_factory=dict)  # id -> Plan
     idempotency: dict = field(default_factory=dict)  # (user, key, method, path) -> record
 
     def add_reservation(self, r):
@@ -273,7 +314,8 @@ class State:
                        "password_hash": u.password_hash} for u in self.users.values()],
             "tokens": [{"token": t, "user_id": uid} for t, uid in self.tokens.items()],
             "restaurants": [dict(r.detail(), manager_user_ids=list(r.managers),
-                                 policies=[p.view() for p in r.policies], revision=r.revision)
+                                 policies=[p.view() for p in r.policies], revision=r.revision,
+                                 closures=[dict(c.view(), plan_id=c.plan_id) for c in r.closures])
                             for r in self.restaurants.values()],
             "reservations": [{
                 "id": r.id, "reference": r.reference, "user_id": r.user_id,
@@ -283,14 +325,23 @@ class State:
                 "created_at": clock.render_utc(r.created_at),
                 "revision": r.revision, "accepted_terms": r.terms.snapshot(),
                 "series_id": r.series_id,
-                "history": [{"seq": h.seq, "at": clock.render_utc(h.at), "event": h.event,
-                             "changes": h.changes, "revision": h.revision,
-                             "accepted_terms": h.terms.snapshot()} for h in r.history],
+                "history": [dict({"seq": h.seq, "at": clock.render_utc(h.at), "event": h.event,
+                                  "changes": h.changes, "revision": h.revision,
+                                  "accepted_terms": h.terms.snapshot()},
+                                 **({"plan_id": h.plan_id} if h.plan_id is not None else {}))
+                            for h in r.history],
             } for r in self.reservations.values()],
             "series": [{"id": s.id, "user_id": s.user_id, "interval_weeks": s.interval_weeks,
                         "occurrences": list(s.occurrences), "revision": s.revision,
-                        "exceptions": [o for o in s.occurrences if o in s.exceptions]}
+                        "exceptions": [o for o in s.occurrences if o in s.exceptions],
+                        "anchor_date": s.anchor_date.isoformat()}
                        for s in self.series.values()],
+            "plans": [{"id": p.id, "restaurant_id": p.restaurant_id, "revision": p.revision,
+                       "closure": p.closure.view(), "applied": p.applied,
+                       "assignments": [{"reservation_id": rid, "table_ids": list(t),
+                                        "changed": changed}
+                                       for rid, t, changed in p.assignments]}
+                      for p in self.plans.values()],
             "idempotency": [{
                 "user_id": i.user_id, "key": i.key, "method": i.method, "path": i.path,
                 "request": i.request, "status": i.status, "response": i.response,
@@ -401,7 +452,29 @@ def _terms_snapshot(raw, restaurant):
                  parse_capacities(raw.get("capacities"), restaurant.table_ids))
 
 
-def _restaurant(raw, exported=False):
+def parse_instant(text):
+    """An RFC 3339 date-time with an explicit offset (`Z` or +HH:MM), as a UTC datetime."""
+    if not isinstance(text, str) or not INSTANT_RE.fullmatch(text):
+        return None
+    try:
+        dt = datetime.fromisoformat(text.upper().replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    return dt.astimezone(timezone.utc)
+
+
+def _closure(raw, restaurant):
+    _obj(raw, "closure")
+    table_id = raw.get("table_id")
+    start, end = parse_instant(raw.get("from")), parse_instant(raw.get("to"))
+    plan_id = raw.get("plan_id")
+    if (table_id not in restaurant.table_ids or start is None or end is None or start >= end
+            or not isinstance(plan_id, str)):
+        raise invalid("invalid closure")
+    return Closure(table_id, raw["from"], raw["to"], start, end, plan_id)
+
+
+def _restaurant(raw, exported=False, closures=False):
     _obj(raw, "restaurant")
     rid = _id(raw, "id")
     name = _str(raw, "name", allow_empty=True)
@@ -446,6 +519,8 @@ def _restaurant(raw, exported=False):
                 raise invalid("policy versions must run from 1 in publication order")
             restaurant.policies.append(parse_policy(p, restaurant, i + 1))
         restaurant.revision = _int(raw, "revision", 0) if "revision" in raw else 0
+    if closures:
+        restaurant.closures = [_closure(c, restaurant) for c in _list(raw, "closures")]
     return restaurant
 
 
@@ -504,7 +579,7 @@ def _reservation(raw, state, default_created, schema=None):
         raise invalid("duplicate reservation id or reference")
     utc, _ = clock.resolve(restaurant.zone, local)
     created = _created_at(raw, default_created)
-    if schema != STATE_SCHEMA:
+    if schema not in (STAGE_3_SCHEMA, STATE_SCHEMA):
         # Seeded, stage-1 and stage-2 bookings: revision 1 under policy 0 (F8).
         res = Reservation(rid, reference, user_id, restaurant_id, table_ids, party, status, local,
                           utc, created, restaurant.base)
@@ -516,11 +591,12 @@ def _reservation(raw, state, default_created, schema=None):
     for i, h in enumerate(_list(raw, "history", required=True)):
         _obj(h, "history entry")
         if h.get("seq") != i + 1 or h.get("event") not in EVENTS or not isinstance(
-                h.get("changes"), list):
+                h.get("changes"), list) or not isinstance(h.get("plan_id", ""), str):
             raise invalid("invalid history entry")
         res.history.append(HistoryEntry(i + 1, _timestamp(h.get("at"), "at"), h["event"],
                                         h["changes"], _int(h, "revision", 1),
-                                        _terms_snapshot(h.get("accepted_terms"), restaurant)))
+                                        _terms_snapshot(h.get("accepted_terms"), restaurant),
+                                        h.get("plan_id")))
     if not res.history:
         raise invalid("a reservation needs its history")
     series_id = raw.get("series_id")
@@ -541,8 +617,38 @@ def _series(raw, state):
                        and state.reservations[o].series_id == sid for o in occurrences)
             or not all(o in occurrences for o in exceptions)):
         raise invalid("invalid series")
-    return Series(sid, uid, _int(raw, "interval_weeks", 1, 4), list(occurrences),
-                  _int(raw, "revision", 1), set(exceptions))
+    series = Series(sid, uid, _int(raw, "interval_weeks", 1, 4), list(occurrences),
+                    _int(raw, "revision", 1), set(exceptions))
+    if "anchor_date" in raw:
+        series.anchor_date = clock.parse_date(raw["anchor_date"])
+        if series.anchor_date is None:
+            raise invalid("invalid series anchor_date")
+    else:
+        # Stage-3 exports: occurrences that are not diner exceptions keep their scheduled date.
+        index = next((i for i, o in enumerate(occurrences) if o not in series.exceptions), 0)
+        local = state.reservations[occurrences[index]].starts_local.date()
+        series.anchor_date = local - timedelta(days=7 * series.interval_weeks * index)
+    return series
+
+
+def _plan(raw, state):
+    _obj(raw, "plan")
+    pid, rid = _id(raw, "id"), _id(raw, "restaurant_id")
+    restaurant = state.restaurants.get(rid)
+    if pid in state.plans or restaurant is None or not isinstance(raw.get("applied"), bool):
+        raise invalid("invalid plan")
+    closure = _closure(dict(_obj(raw.get("closure"), "closure"), plan_id=pid), restaurant)
+    assignments = []
+    for a in _list(raw, "assignments", required=True):
+        _obj(a, "assignment")
+        res = state.reservations.get(a.get("reservation_id"))
+        tables = a.get("table_ids")
+        if (res is None or not isinstance(tables, list) or not 1 <= len(tables) <= 2
+                or not all(t in restaurant.table_ids for t in tables)
+                or not isinstance(a.get("changed"), bool)):
+            raise invalid("invalid plan assignment")
+        assignments.append((res.id, list(tables), a["changed"]))
+    return Plan(pid, rid, _int(raw, "revision", 0), closure, assignments, raw["applied"])
 
 
 def _user_fields(u):
@@ -560,9 +666,9 @@ def _add_user(state, uid, email, display_name, password_hash):
     state.emails[email.lower()] = uid
 
 
-def _add_restaurants(state, raws, exported=False):
+def _add_restaurants(state, raws, exported=False, closures=False):
     for raw in raws:
-        r = _restaurant(raw, exported)
+        r = _restaurant(raw, exported, closures)
         if r.id in state.restaurants:
             raise invalid(f"duplicate restaurant id {r.id!r}")
         state.restaurants[r.id] = r
@@ -605,7 +711,8 @@ def from_export(doc):
         raise invalid("format_version must be 1")
     raw = _obj(doc.get("state"), "state")
     schema = raw.get("schema")
-    if not is_int(schema) or schema not in (STAGE_1_SCHEMA, STAGE_2_SCHEMA, STATE_SCHEMA):
+    if not is_int(schema) or schema not in (STAGE_1_SCHEMA, STAGE_2_SCHEMA, STAGE_3_SCHEMA,
+                                            STATE_SCHEMA):
         raise invalid("unsupported state schema")
 
     state = State()
@@ -621,11 +728,11 @@ def from_export(doc):
             raise invalid("invalid token entry")
         state.tokens[token] = uid
     _add_restaurants(state, _list(raw, "restaurants", required=True),
-                     exported=schema == STATE_SCHEMA)
+                     exported=schema >= STAGE_3_SCHEMA, closures=schema == STATE_SCHEMA)
     now = clock.now_utc().replace(microsecond=0)
     for r in _list(raw, "reservations", required=True):
         state.add_reservation(_reservation(r, state, now, schema=schema))
-    if schema == STATE_SCHEMA:
+    if schema >= STAGE_3_SCHEMA:
         for s in _list(raw, "series", required=True):
             series = _series(s, state)
             state.series[series.id] = series
@@ -633,6 +740,10 @@ def from_export(doc):
             if r.series_id is not None and r.id not in state.series.get(r.series_id,
                                                                          Series("", "", 1, [])).occurrences:
                 raise invalid("reservation refers to an unknown series")
+    if schema == STATE_SCHEMA:
+        for p in _list(raw, "plans", required=True):
+            plan = _plan(p, state)
+            state.plans[plan.id] = plan
     for i in _list(raw, "idempotency", required=True):
         _obj(i, "idempotency record")
         rec = IdempotencyRecord(_id(i, "user_id"), _str(i, "key"), _str(i, "method"),

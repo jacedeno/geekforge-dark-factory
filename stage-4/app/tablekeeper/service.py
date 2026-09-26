@@ -11,8 +11,10 @@ from datetime import timedelta
 
 from . import clock
 from .errors import ApiError, invalid, malformed, not_found, unauthenticated
-from .model import (IdempotencyRecord, Reservation, Series, State, User, created_changes,
-                    from_export, from_fixture, is_int, parse_policy, table_changes)
+from .model import (Closure, IdempotencyRecord, Plan, Reservation, Series, State, User,
+                    created_changes, from_export, from_fixture, is_int, parse_instant,
+                    parse_policy, table_changes)
+from .planner import Booking, Candidate, best_plan
 from .passwords import hash_password, verify_password
 
 _BEARER_RE = re.compile(r"Bearer ([^\s]+)")
@@ -21,6 +23,7 @@ _REFERENCE_ALPHABET = string.ascii_uppercase + string.digits
 _REFERENCE_LENGTH = 8
 _MAX_MOVES = 8
 _AMENDABLE = ("table_id", "table_ids", "starts_at_local", "party_size")
+_PLAN_MAX_TABLES, _PLAN_MAX_PAIRS, _PLAN_MAX_BOOKINGS = 6, 4, 6
 
 
 class Request:
@@ -152,7 +155,10 @@ class Service:
         return clock.now_utc() >= res.starts_utc - timedelta(minutes=res.terms.cutoff)
 
     def _overlaps(self, restaurant, table_ids, start, end, exclude):
-        """True when a confirmed reservation not in `exclude` holds any of these tables."""
+        """True when an applied closure or a confirmed reservation not in `exclude` holds any of
+        these tables during [start, end)."""
+        if restaurant.closed(table_ids, start, end):
+            return True
         members = set(table_ids)
         for other in self.state.reservations.values():
             if (other.status == "confirmed" and other.id not in exclude
@@ -355,6 +361,8 @@ class Service:
                 end = start + duration
                 busy = {t for r in booked if r.starts_utc < end and start < r.ends_utc
                         for t in r.table_ids}
+                busy.update(c.table_id for c in restaurant.closures
+                            if c.start < end and start < c.end)
                 free = [o for o in options if busy.isdisjoint(o)]
                 slot = {
                     "starts_at_local": clock.format_local(local),
@@ -704,7 +712,8 @@ class Service:
             res.series_id = series_id
             occurrences.append(res.id)
         anchor.series_id = series_id
-        series = Series(series_id, uid, interval, occurrences)
+        series = Series(series_id, uid, interval, occurrences,
+                        anchor_date=anchor.starts_local.date())
         self.state.series[series_id] = series
         restaurant.revision += 1
         return self._series_view(series)
@@ -726,3 +735,190 @@ class Service:
             if series is None or uid is None or series.user_id != uid:
                 raise not_found("series not found")
             return 200, self._series_view(series)
+
+    def amend_series(self, req):
+        with self.lock:
+            uid = self._auth(req)
+            key = self._idempotency_key(req)
+            body = parse_object(req.body)
+            replay = self._replay(uid, key, req, body)
+            if replay:
+                return replay
+            response = self._amend_series(uid, req.params[0], body)
+            self._record(uid, key, req, body, 201, response)
+            return 201, response
+
+    def _amend_series(self, uid, series_id, body):
+        series = self.state.series.get(series_id)
+        if series is None or series.user_id != uid:
+            raise not_found("series not found")
+        expected, from_index = body.get("expected_revision"), body.get("from_index")
+        local_time = body.get("local_time")
+        if not is_int(expected) or expected < 1:
+            raise invalid("expected_revision must be a positive integer")
+        if not is_int(from_index) or not 0 <= from_index < len(series.occurrences):
+            raise invalid("from_index must be an occurrence index")
+        minute = clock.parse_hhmm(local_time)
+        if minute is None:
+            raise invalid("local_time must be HH:MM")
+        if expected != series.revision:
+            raise ApiError(409, "stale_revision", "the series has changed since that revision")
+
+        restaurant = None
+        planned = []
+        for index in range(from_index, len(series.occurrences)):
+            res = self.state.reservations[series.occurrences[index]]
+            if res.status == "cancelled" or res.id in series.exceptions:
+                continue
+            restaurant = self.state.restaurants[res.restaurant_id]
+            day = series.scheduled_date(index)
+            local = clock.day_start(day) + timedelta(minutes=minute)
+            if local == res.starts_local:
+                continue  # identical result: a no-op that keeps its terms
+            if self._cutoff_passed(res):
+                raise ApiError(409, "cutoff_passed", "an occurrence's cutoff has passed")
+            start, terms = self._check_booking(restaurant, res.table_ids, local, res.party_size)
+            planned.append((res, local, start, start + timedelta(minutes=terms.duration), terms))
+        if not planned:
+            return self._series_view(series)
+
+        changed = {p[0].id for p in planned}
+        for i, (res, _, start, end, _) in enumerate(planned):
+            if self._overlaps(restaurant, res.table_ids, start, end, exclude=changed):
+                raise self._unavailable()
+            for other in planned[i + 1:]:
+                if (not set(other[0].table_ids).isdisjoint(res.table_ids)
+                        and other[2] < end and start < other[3]):
+                    raise self._unavailable()
+
+        now = self._now()
+        for res, local, start, _, terms in planned:
+            self._apply(res, res.table_ids, local, res.party_size, start, terms, now)
+        series.revision += 1
+        restaurant.revision += 1
+        return self._series_view(series)
+
+    # ---- seating changes after a table closure ------------------------------------------------
+
+    def _manager(self, req):
+        """401, 404 unknown restaurant, 403 non-manager (G2, G6). Returns (user, restaurant)."""
+        uid = self._auth(req)
+        restaurant = self.state.restaurants.get(req.params[0])
+        if restaurant is None:
+            raise not_found("restaurant not found")
+        if uid not in restaurant.managers:
+            raise ApiError(403, "forbidden", "only the restaurant's managers may do this")
+        return uid, restaurant
+
+    def replan(self, req):
+        with self.lock:
+            uid, restaurant = self._manager(req)
+            key = self._idempotency_key(req)
+            body = parse_object(req.body)
+            replay = self._replay(uid, key, req, body)
+            if replay:
+                return replay
+            response = self._replan(restaurant, body)
+            self._record(uid, key, req, body, 201, response)
+            return 201, response
+
+    def _replan(self, restaurant, body):
+        table_id = body.get("table_id")
+        start, end = parse_instant(body.get("from")), parse_instant(body.get("to"))
+        if not isinstance(table_id, str):
+            raise invalid("table_id must be a string")
+        if start is None or end is None:
+            raise invalid("from and to must be RFC 3339 date-times with an offset")
+        if start >= end:
+            raise invalid("from must be earlier than to")
+        if table_id not in restaurant.table_ids:
+            raise not_found("table not found")
+        considered = sorted((r for r in self.state.reservations.values()
+                             if r.status == "confirmed" and r.restaurant_id == restaurant.id
+                             and r.starts_utc < end and start < r.ends_utc),
+                            key=lambda r: r.reference)
+        options = restaurant.options()
+        if (len(restaurant.table_ids) > _PLAN_MAX_TABLES
+                or len(options) - len(restaurant.table_ids) > _PLAN_MAX_PAIRS
+                or len(considered) > _PLAN_MAX_BOOKINGS):
+            raise ApiError(422, "planning_limit", "this closure is too large to plan")
+
+        ids = {r.id for r in considered}
+        fixed = [r for r in self.state.reservations.values()
+                 if r.status == "confirmed" and r.restaurant_id == restaurant.id
+                 and r.id not in ids]
+        bookings = []
+        for r in considered:
+            candidates = []
+            for rank, option in enumerate(options):
+                if table_id in option or r.terms.seats(option) < r.party_size:
+                    continue
+                if restaurant.closed(option, r.starts_utc, r.ends_utc) or any(
+                        not set(option).isdisjoint(f.table_ids)
+                        and f.starts_utc < r.ends_utc and r.starts_utc < f.ends_utc
+                        for f in fixed):
+                    continue
+                candidates.append(Candidate(tuple(option), rank,
+                                            r.terms.seats(option) - r.party_size,
+                                            set(option) != set(r.table_ids)))
+            bookings.append(Booking(r.id, r.starts_utc, r.ends_utc, candidates))
+        chosen = best_plan(bookings)
+        if chosen is None:
+            raise ApiError(409, "no_feasible_plan", "no seating plan satisfies every booking")
+
+        plan_id = self._new_id("plan_", self.state.plans)
+        closure = Closure(table_id, body["from"], body["to"], start, end, plan_id)
+        plan = Plan(plan_id, restaurant.id, restaurant.revision, closure,
+                    [(r.id, list(c.tables), c.changed) for r, c in zip(considered, chosen)])
+        self.state.plans[plan_id] = plan
+        return {
+            "plan_id": plan_id,
+            "restaurant_revision": restaurant.revision,
+            "closure": closure.view(),
+            "assignments": [{"reference": r.reference, "table_ids": list(c.tables),
+                             "changed": c.changed} for r, c in zip(considered, chosen)],
+            "moved_count": sum(c.changed for c in chosen),
+            "unused_seats": sum(c.unused for c in chosen),
+        }
+
+    def apply_plan(self, req):
+        with self.lock:
+            uid, restaurant = self._manager(req)
+            key = self._idempotency_key(req)
+            body = parse_object(req.body)
+            replay = self._replay(uid, key, req, body)
+            if replay:
+                return replay
+            plan = self.state.plans.get(req.params[1])
+            if plan is None or plan.restaurant_id != restaurant.id:
+                raise not_found("plan not found")
+            if plan.applied:
+                raise ApiError(409, "plan_already_applied", "this plan has already been applied")
+            if plan.revision != restaurant.revision:
+                raise ApiError(409, "stale_plan", "the restaurant has changed since this plan")
+            response = self._apply_plan(restaurant, plan)
+            self._record(uid, key, req, body, 201, response)
+            return 201, response
+
+    def _apply_plan(self, restaurant, plan):
+        now = self._now()
+        touched_series = set()
+        for rid, tables, changed in plan.assignments:
+            res = self.state.reservations[rid]
+            if not changed:
+                continue
+            before = list(res.table_ids)
+            res.table_ids = list(tables)
+            res.revision += 1
+            res.record("reassigned", [{"field": "table_ids", "from": before, "to": list(tables)}],
+                       now, plan_id=plan.id)
+            if res.series_id:
+                touched_series.add(res.series_id)
+        restaurant.closures.append(plan.closure)
+        plan.applied = True
+        restaurant.revision += 1
+        for sid in touched_series:
+            self.state.series[sid].revision += 1
+        return {"plan_id": plan.id, "restaurant_revision": restaurant.revision,
+                "reservations": [self._view(self.state.reservations[rid])
+                                 for rid, _, _ in plan.assignments]}

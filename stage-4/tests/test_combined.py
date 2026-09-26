@@ -222,7 +222,7 @@ class UpgradeTest(ServiceTest):
         self.assertEqual(self.client.get("/restaurants/r_anker")[1]["combinable"], [])
         self.login()
         exported = self.client.get("/_test/export")[1]
-        self.assertEqual(exported["state"]["schema"], 3)
+        self.assertEqual(exported["state"]["schema"], 4)
         self.assertEqual(self.client.post("/_test/import", exported)[0], 204)
         legacy = copy.deepcopy(doc)
         legacy["state"]["reservations"][0]["table_ids"] = ["t_2"]

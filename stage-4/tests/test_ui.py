@@ -249,6 +249,36 @@ class UiTest(ServiceTest):
         self.search(date="2030-09-19", party=5)  # before the policy: fixture capacities
         p.wait_for_selector(T("slot-t_2+t_1-19:00"))
 
+    def test_screens_show_tables_after_an_applied_plan(self):
+        combo = dict(WEEKDAY_COMBO, manager_user_ids=["u_bob"])
+        self.reset(fixture(restaurants=[combo] + FIXTURE["restaurants"]))
+        p = self.page
+        self.login()
+        self.search(party=2)
+        p.click(T("slot-t_1-19:00"))
+        p.click(T("booking-submit"))
+        p.wait_for_selector(T("confirmation-reference"))
+        ref = p.inner_text(T("confirmation-reference"))
+        bob = self.client.post("/auth/login", {"email": "bob@example.com",
+                                               "password": "battery staple"})[1]["token"]
+        closure = {"table_id": "t_1", "from": f"{FUTURE}T18:00:00+02:00",
+                   "to": f"{FUTURE}T22:00:00+02:00"}
+        plan = self.client.post("/restaurants/r_combo/replans", closure, token=bob, key="r")[1]
+        self.assertEqual(plan["assignments"][0]["table_ids"], ["t_2"])
+        self.client.post(f"/restaurants/r_combo/replans/{plan['plan_id']}/apply", {}, token=bob,
+                         key="a")
+        p.click(T("booking-submit"))  # an unchanged resubmission replays the original receipt
+        p.wait_for_function("document.querySelector('[data-testid=confirmation-tables]')"
+                            ".textContent.includes('Table 2')")
+        self.assertEqual(p.inner_text(T("confirmation-reference")), ref)
+        p.goto(self.base + "/lookup")
+        p.fill(T("lookup-reference-input"), ref)
+        p.click(T("lookup-submit"))
+        p.wait_for_selector(T("reservation-detail"))
+        self.assertEqual(p.inner_text(T("reservation-tables")), "Table 2")
+        self.search(party=2)
+        p.wait_for_selector(f'{T("slot-t_1-19:00")}[data-available="false"]')
+
     def test_no_horizontal_scroll_on_small_screens(self):
         p = self.page
         p.set_viewport_size({"width": 375, "height": 800})
