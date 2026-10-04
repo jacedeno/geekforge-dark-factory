@@ -79,7 +79,34 @@ only needs it to exit 0 on success.
 - **Loops:** three failed verifications on the same criterion send the decision back to the
   planner, who changes the order, splits it, or records a known gap.
 
+## What we tried that failed
+
+| Tried | What went wrong | Replaced by |
+|---|---|---|
+| Interactive Claude Code seats in terminal panes, joined with the plugin's `/jam as <role>` | The plugin always adds a random suffix to the seat name (`planner-6mcx`), so mandates could not be named after their seats; and a terminal is a place a human can type into mid-run | Headless Jam-owned seats with exact names (`factory-seats`) |
+| One room per stage, the owner accepting each stage | Four room logs instead of one, and an owner approval between stages is human input | One room; the verifier accepts, the planner advances |
+| One git worktree per seat, the owner merging the builder's branch | The merge is the owner touching the delivered code | One shared checkout; each seat commits only its own directory |
+| The planner asking the owner about ambiguities (11 questions in the pre-kickoff rehearsal) | Not allowed in an unattended run | The planner decides, records the decision, and the builder or verifier can challenge it with evidence |
+| Removing seats after a run | Band shows a removed seat's messages as sent by "Unknown", breaking the seat-to-mandate link in the room log | `factory-seats remove` refuses until the room has been downloaded |
+
 ## Measured cost
 
-<filled in from the submitted run: wall time per increment, subscription usage per increment,
-number of work orders, rejections and what they caught>
+Reference run: the four-stage reservations problem of the event this factory was built for, one
+dispatch, no human input until the final report. All three seats `claude-opus-5-5`, effort high,
+on a Claude subscription (no per-token billing; token figures are Jam's catalog estimate).
+
+| Increment | Wall time | Deliveries | Rejections | Verifier's own probes |
+|---|---|---|---|---|
+| 1 (JSON API) | ~30 min | 2 | 1 (wrong status for unsupported methods; an export that could not be re-imported) | 127 |
+| 2 (browser UI) | ~23 min | 1 | 0 | 39 API + 25 browser |
+| 3 (time-dependent rules) | ~18 min | 1 | 0 | 37 |
+| 4 (bulk changes) | ~18 min | 1 | 0 | 80, incl. 60 random scenarios against an exhaustive reference |
+| **Total** | **89 min** | 5 | 1 | 308 |
+
+Tokens: 110 M in total (~$41 at catalog prices): verifier 54 M, builder 47 M, planner 8 M. The
+verifier is the most expensive seat by design: it rebuilds from a fresh clone and runs the full
+check twice per verdict, plus its own probes. Commits: verifier 14, planner 10, builder 9.
+
+A smaller rehearsal problem (a shared counter, four increments) took 20 minutes and 22 M tokens,
+with one rejection in increment 4 that no shipped check covered (integers over 4,300 digits
+killed the service).
