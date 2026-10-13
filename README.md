@@ -122,3 +122,11 @@ failed, and this page gained its images and badges. None of these touch `stage-N
 ## License
 
 [MIT](LICENSE)
+
+---
+
+<p align="center">
+  Built by <b>Jose Cedeno</b> ·
+  <a href="https://geekendzone.com">geekendzone.com</a> ·
+  <a href="https://www.linkedin.com/in/joseangelcedeno/">LinkedIn</a>
+</p>
